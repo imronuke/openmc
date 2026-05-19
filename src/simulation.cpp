@@ -192,6 +192,10 @@ int openmc_simulation_finalize()
   // Increment total number of generations
   simulation::total_gen += simulation::current_batch * settings::gen_per_batch;
 
+  if (using_tally_tt()) {
+    materialize_tally_tt_results();
+  }
+
 #ifdef OPENMC_MPI
   broadcast_results();
 #endif
@@ -431,9 +435,19 @@ void finalize_batch()
   accumulate_tallies();
   simulation::time_tallies.stop();
 
-  // update weight windows if needed
-  for (const auto& wwg : variance_reduction::weight_windows_generators) {
-    wwg->update();
+  // update weight windows if needed.
+  // Skipping weight window generator updates when TT is used.
+  if (!using_tally_tt()) {
+    for (const auto& wwg : variance_reduction::weight_windows_generators) {
+      wwg->update();
+    }
+  } else if (!variance_reduction::weight_windows_generators.empty()) {
+    static bool warned_tt_weight_windows {false};
+    if (!warned_tt_weight_windows) {
+      warning("Skipping weight window generator updates with tensor-train "
+              "tally accumulation.");
+      warned_tt_weight_windows = true;
+    }
   }
 
   // Reset global tally results
@@ -456,8 +470,34 @@ void finalize_batch()
 
   // Write out state point if it's been specified for this batch and is not
   // a CMFD run instance
-  if (contains(settings::statepoint_batch, simulation::current_batch) &&
-      !settings::cmfd_run) {
+  // 1. determines whether the current batch is a final result
+  bool final_tally_results =
+    simulation::current_batch == settings::n_max_batches ||
+    simulation::satisfy_triggers;
+
+  if (final_tally_results && using_tally_tt()) {
+    materialize_tally_tt_results();
+  }
+
+  // 2. determines if we need to write a statepoint 
+  bool write_statepoint =
+    contains(settings::statepoint_batch, simulation::current_batch) &&
+    !settings::cmfd_run;
+
+  // 3. Provide warning if write_statepoint is true and TT is used.
+  // Also alter write_statepoint to false.
+  if (write_statepoint && using_tally_tt() && !final_tally_results) {
+    static bool warned_tt_statepoint {false};
+    if (!warned_tt_statepoint) {
+      warning("Skipping intermediate statepoint writes with tensor-train "
+              "tally accumulation because dense tally sums are not "
+              "materialized until the final result boundary.");
+      warned_tt_statepoint = true;
+    }
+    write_statepoint = false;
+  }
+
+  if (write_statepoint) {
     if (contains(settings::sourcepoint_batch, simulation::current_batch) &&
         settings::source_write && !settings::source_separate) {
       bool b = (settings::run_mode == RunMode::EIGENVALUE);

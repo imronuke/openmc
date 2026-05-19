@@ -7,6 +7,7 @@
 #include "openmc/tallies/filter.h"
 #include "openmc/tallies/trigger.h"
 #include "openmc/vector.h"
+#include "openmc/tt.h"
 
 #include "openmc/tensor.h"
 #include "pugixml.hpp"
@@ -126,6 +127,9 @@ public:
   //! Tally results reshaped according to filter sizes
   tensor::Tensor<double> get_reshaped_data() const;
 
+  //! Materialize tensor-train accumulated sums into dense results.
+  void materialize_tt_results();
+
   //! A string representing the i-th score on this tally
   std::string score_name(int score_idx) const;
 
@@ -160,6 +164,21 @@ public:
   //! and the second dimension of the array is for scores (e.g. flux, total
   //! reaction rate, fission reaction rate, etc.)
   tensor::Tensor<double> results_;
+
+  //! Whether to store accumulated SUM/SUM_SQ in tensor-train format.
+  bool use_tt_ {true};
+
+  //! Tensor-train accumulated SUM.
+  TT tt_sum_;
+
+  //! Tensor-train accumulated SUM_SQ.
+  TT tt_sum_sq_;
+
+  //! Logical tensor shape used by TT accumulation.
+  vector<int> tt_shape_;
+
+  //! Relative TT truncation tolerance.
+  double tt_eps_ {1.0e-8};
 
   //! True if this tally should be written to statepoint files
   bool writable_ {true};
@@ -244,6 +263,12 @@ void read_tallies_xml(pugi::xml_node root);
 //! \brief Accumulate the sum of the contributions from each history within the
 //! batch to a new random variable
 void accumulate_tallies();
+
+//! Materialize all active TT tally accumulators into dense results.
+void materialize_tally_tt_results();
+
+//! Return whether any tally is using tensor-train accumulation.
+bool using_tally_tt();
 
 //! Determine distance to next time boundary
 //

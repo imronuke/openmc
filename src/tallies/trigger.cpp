@@ -65,6 +65,11 @@ void check_tally_triggers(double& ratio, int& tally_id, int& score)
     if (t.n_realizations_ < 2)
       continue;
 
+    // TT tallies do not have dense SUM/SUM_SQ materialized until the final
+    // result boundary in the current implementation.
+    if (t.use_tt_)
+      continue;
+
     for (const auto& trigger : t.triggers_) {
       // Skip trigger if it is not active
       if (trigger.metric == TriggerMetric::not_active)

@@ -43,6 +43,7 @@
 #include <cassert>
 #include <cstddef>  // for size_t
 #include <iterator> // for back_inserter
+#include <optional>
 #include <string>
 
 namespace openmc {
@@ -839,6 +840,26 @@ void Tally::init_triggers(pugi::xml_node node)
 void Tally::init_results()
 {
   int n_scores = scores_.size() * nuclides_.size();
+  if (use_tt_) {
+    if (higher_moments_) {
+      fatal_error("Tensor-train tally accumulation does not support higher "
+                  "moments.");
+    }
+
+    results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
+      static_cast<size_t>(n_scores), size_t {1}});
+
+    tt_shape_.clear();
+    for (auto i_filt : filters_) {
+      tt_shape_.push_back(model::tally_filters[i_filt]->n_bins());
+    }
+    tt_shape_.push_back(n_scores);
+
+    tt_sum_ = tt_zeros(tt_shape_);
+    tt_sum_sq_ = tt_zeros(tt_shape_);
+    return;
+  }
+
   if (higher_moments_) {
     results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
       static_cast<size_t>(n_scores), size_t {5}});
@@ -851,7 +872,13 @@ void Tally::init_results()
 void Tally::reset()
 {
   n_realizations_ = 0;
-  if (results_.size() != 0) {
+  if (use_tt_ && !tt_shape_.empty()) {
+    int n_scores = scores_.size() * nuclides_.size();
+    results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
+      static_cast<size_t>(n_scores), size_t {1}});
+    tt_sum_ = tt_zeros(tt_shape_);
+    tt_sum_sq_ = tt_zeros(tt_shape_);
+  } else if (results_.size() != 0) {
     results_.fill(0.0);
   }
 }
@@ -883,6 +910,18 @@ void Tally::accumulate()
       norm = 1.0;
     }
 
+    if (use_tt_) {
+      int n = results_.shape(0) * results_.shape(1);
+      tt_sum_ = tt_sum_ + tt_svd_tally_value(
+                            results_.data(), n, tt_shape_, norm, false, tt_eps_);
+      tt_sum_sq_ = tt_sum_sq_ + tt_svd_tally_value(
+                                  results_.data(), n, tt_shape_, norm, true, tt_eps_);
+      tt_sum_.round(std::nullopt, tt_eps_);
+      tt_sum_sq_.round(std::nullopt, tt_eps_);
+      std::fill(results_.data(), results_.data() + n, 0.0);
+      return;
+    }
+
     // Accumulate each result
     if (higher_moments_) {
 #pragma omp parallel for
@@ -911,6 +950,32 @@ void Tally::accumulate()
           results_(i, j, TallyResult::SUM_SQ) += val * val;
         }
       }
+    }
+  }
+}
+
+void Tally::materialize_tt_results()
+{
+  if (!use_tt_)
+    return;
+
+  int n_scores = scores_.size() * nuclides_.size();
+  auto [sum, sum_shape] = tt_sum_.full();
+  auto [sum_sq, sum_sq_shape] = tt_sum_sq_.full();
+
+  if (sum_shape != tt_shape_ || sum_sq_shape != tt_shape_) {
+    fatal_error("Tensor-train tally result shape mismatch.");
+  }
+
+  results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
+    static_cast<size_t>(n_scores), size_t {3}});
+
+  for (int i = 0; i < n_filter_bins_; ++i) {
+    for (int j = 0; j < n_scores; ++j) {
+      int flat = i * n_scores + j;
+      results_(i, j, TallyResult::VALUE) = 0.0;
+      results_(i, j, TallyResult::SUM) = sum[flat];
+      results_(i, j, TallyResult::SUM_SQ) = sum_sq[flat];
     }
   }
 }
@@ -1139,6 +1204,22 @@ void accumulate_tallies()
     auto& tally {model::tallies[i_tally]};
     tally->accumulate();
   }
+}
+
+void materialize_tally_tt_results()
+{
+  for (auto& tally : model::tallies) {
+    tally->materialize_tt_results();
+  }
+}
+
+bool using_tally_tt()
+{
+  for (const auto& tally : model::tallies) {
+    if (tally->use_tt_)
+      return true;
+  }
+  return false;
 }
 
 double distance_to_time_boundary(double time, double speed)
