@@ -912,10 +912,10 @@ void Tally::accumulate()
 
     if (use_tt_) {
       int n = results_.shape(0) * results_.shape(1);
-      tt_sum_ = tt_sum_ + tt_svd_tally_value(
-                            results_.data(), n, tt_shape_, norm, false, tt_eps_);
-      tt_sum_sq_ = tt_sum_sq_ + tt_svd_tally_value(
-                                  results_.data(), n, tt_shape_, norm, true, tt_eps_);
+      tt_sum_ = tt_sum_ + tt_svd_tally_value(results_.data(), n, tt_shape_,
+                            norm, false, tt_eps_);
+      tt_sum_sq_ = tt_sum_sq_ + tt_svd_tally_value(results_.data(), n,
+                                  tt_shape_, norm, true, tt_eps_);
       tt_sum_.round(std::nullopt, tt_eps_);
       tt_sum_sq_.round(std::nullopt, tt_eps_);
       std::fill(results_.data(), results_.data() + n, 0.0);
@@ -958,6 +958,10 @@ void Tally::materialize_tt_results()
 {
   if (!use_tt_)
     return;
+
+  // confirms when TT tally results are reconstructed
+  write_message(
+    5, "Materializing tensor-train tally results for tally {}", id_);
 
   int n_scores = scores_.size() * nuclides_.size();
   auto [sum, sum_shape] = tt_sum_.full();
