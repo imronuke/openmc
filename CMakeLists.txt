@@ -188,6 +188,11 @@ if(NOT DEFINED HDF5_PREFER_PARALLEL)
 endif()
 
 find_package(HDF5 REQUIRED COMPONENTS C HL)
+find_path(OPENMC_EIGEN3_INCLUDE_DIR
+  NAMES Eigen/Dense
+  HINTS "$ENV{CONDA_PREFIX}/include/eigen3"
+  PATH_SUFFIXES eigen3
+  REQUIRED)
 
 # Remove HDF5 transitive dependencies that are system libraries
 list(FILTER HDF5_LIBRARIES EXCLUDE REGEX ".*lib(pthread|dl|m).*")
@@ -467,6 +472,7 @@ list(APPEND libopenmc_SOURCES
   src/thermal.cpp
   src/timer.cpp
   src/track_output.cpp
+  src/tt.cpp
   src/universe.cpp
   src/urr.cpp
   src/volume_calc.cpp
@@ -503,6 +509,7 @@ target_include_directories(libopenmc
   PUBLIC
     $<INSTALL_INTERFACE:include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    ${OPENMC_EIGEN3_INCLUDE_DIR}
     ${HDF5_INCLUDE_DIRS}
 )
 
