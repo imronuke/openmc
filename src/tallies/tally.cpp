@@ -849,11 +849,16 @@ void Tally::init_results()
     results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
       static_cast<size_t>(n_scores), size_t {1}});
 
-    tt_shape_.clear();
-    for (auto i_filt : filters_) {
-      tt_shape_.push_back(model::tally_filters[i_filt]->n_bins());
+    tt_shape_ = auto_tt_shape(n_filter_bins_);
+    auto score_shape = auto_tt_shape(n_scores);
+    tt_shape_.insert(tt_shape_.end(), score_shape.begin(), score_shape.end());
+
+    int64_t tt_size = 1;
+    for (int n : tt_shape_)
+      tt_size *= n;
+    if (tt_size != static_cast<int64_t>(n_filter_bins_) * n_scores) {
+      fatal_error("Tensor-train tally shape does not match dense tally size.");
     }
-    tt_shape_.push_back(n_scores);
 
     tt_sum_ = tt_zeros(tt_shape_);
     tt_sum_sq_ = tt_zeros(tt_shape_);

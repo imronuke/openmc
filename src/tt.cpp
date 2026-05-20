@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -780,6 +781,98 @@ TT tt_zeros(const std::vector<int>& shape) {
     for (int n : shape)
         cores.emplace_back(1, n, 1);   // all-zero rank-1 cores
     return TT(std::move(cores));
+}
+
+std::vector<int> prime_factors(int n) {
+    std::vector<int> factors;
+    if (n <= 1) return factors;
+    while (n % 2 == 0) {
+        factors.push_back(2);
+        n /= 2;
+    }
+    for (int p = 3; p * p <= n; p += 2) {
+        while (n % p == 0) {
+            factors.push_back(p);
+            n /= p;
+        }
+    }
+    if (n > 1) factors.push_back(n);
+    return factors;
+}
+
+std::vector<int> balanced_groups_no_empty(int n, int order) {
+    if (order <= 0)
+        throw std::invalid_argument("auto_tt_shape: order must be positive");
+    if (n <= 1) return std::vector<int>(order, 1);
+
+    auto primes = prime_factors(n);
+    std::sort(primes.rbegin(), primes.rend());
+
+    std::vector<int> groups(order, 1);
+    std::vector<double> logs(order, 0.0);
+    for (int p : primes) {
+        int j = static_cast<int>(
+            std::min_element(logs.begin(), logs.end()) - logs.begin());
+        groups[j] *= p;
+        logs[j] += std::log(static_cast<double>(p));
+    }
+    std::sort(groups.begin(), groups.end());
+    return groups;
+}
+
+double score_dims_list(
+    const std::vector<int>& dims, int site_min, int site_cap) {
+    double penalty = 0.0;
+    std::vector<double> logs;
+    logs.reserve(dims.size());
+
+    for (int n : dims) {
+        if (n <= 0)
+            throw std::invalid_argument("auto_tt_shape: dimensions must be positive");
+        if (n == 1) {
+            penalty += 2.0;
+        } else {
+            if (n < site_min) penalty += static_cast<double>(site_min - n) / site_min;
+            if (n > site_cap) penalty += static_cast<double>(n - site_cap) / site_cap;
+            logs.push_back(std::log(static_cast<double>(n)));
+        }
+    }
+
+    if (logs.size() >= 2) {
+        double mu = std::accumulate(logs.begin(), logs.end(), 0.0) / logs.size();
+        double var = 0.0;
+        for (double x : logs) var += (x - mu) * (x - mu);
+        penalty += var / logs.size();
+    }
+    return penalty;
+}
+
+std::vector<int> auto_tt_shape(int n,
+                               int site_min,
+                               int site_cap,
+                               int prefer_order,
+                               int min_order,
+                               int max_order) {
+    if (n <= 0)
+        throw std::invalid_argument("auto_tt_shape: n must be positive");
+    if (site_min <= 1 || site_cap < site_min || prefer_order <= 0 ||
+        min_order <= 0 || max_order < min_order)
+        throw std::invalid_argument("auto_tt_shape: invalid parameters");
+    if (n <= 1) return {1};
+    if (n <= site_cap) return {n};
+
+    double best_score = std::numeric_limits<double>::infinity();
+    std::vector<int> best_dims;
+    for (int d = min_order; d <= max_order; ++d) {
+        auto dims = balanced_groups_no_empty(n, d);
+        double s = score_dims_list(dims, site_min, site_cap) +
+                   0.1 * std::abs(d - prefer_order);
+        if (s < best_score) {
+            best_score = s;
+            best_dims = std::move(dims);
+        }
+    }
+    return best_dims;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
