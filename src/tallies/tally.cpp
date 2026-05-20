@@ -954,14 +954,45 @@ void Tally::accumulate()
   }
 }
 
-void Tally::materialize_tt_results()
+void Tally::write_tt_storage_report() const
 {
   if (!use_tt_)
     return;
 
-  // confirms when TT tally results are reconstructed
+  int n_scores = scores_.size() * nuclides_.size();
+  auto dense_accumulated_bytes =
+    static_cast<std::size_t>(2) * n_filter_bins_ * n_scores * sizeof(double);
+  auto tt_accumulated_bytes =
+    tt_storage_bytes(tt_sum_) + tt_storage_bytes(tt_sum_sq_);
+
+  std::string ratio = "inf";
+  if (tt_accumulated_bytes > 0) {
+    ratio = fmt::format("{:.6g}",
+      static_cast<double>(dense_accumulated_bytes) / tt_accumulated_bytes);
+  }
+
   write_message(
-    5, "Materializing tensor-train tally results for tally {}", id_);
+    5, "Tally {} tensor-train accumulated storage:", id_);
+  write_message(5, "  dense accumulated storage        {} bytes",
+    dense_accumulated_bytes);
+  write_message(5, "  TT accumulated storage           {} bytes",
+    tt_accumulated_bytes);
+  write_message(5, "  accumulated compression ratio    {}", ratio);
+  write_message(5, "  tt_sum                           {}", tt_sum_.repr());
+  write_message(5, "  tt_sum_sq                        {}", tt_sum_sq_.repr());
+}
+
+void Tally::reconstruct_tt_results()
+{
+  if (!use_tt_)
+    return;
+
+  if (results_.shape(2) >= 3)
+    return;
+
+  write_tt_storage_report();
+  write_message(
+    5, "Reconstructing tensor-train tally results for tally {}", id_);
 
   int n_scores = scores_.size() * nuclides_.size();
   auto [sum, sum_shape] = tt_sum_.full();
@@ -1210,10 +1241,10 @@ void accumulate_tallies()
   }
 }
 
-void materialize_tally_tt_results()
+void reconstruct_tally_tt_results()
 {
   for (auto& tally : model::tallies) {
-    tally->materialize_tt_results();
+    tally->reconstruct_tt_results();
   }
 }
 
