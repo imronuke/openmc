@@ -142,6 +142,13 @@ TT tt_rand(const std::vector<double>& tensor,
 // Create zero TT of given shape (rank-1 cores)
 TT tt_zeros(const std::vector<int>& shape);
 
+std::vector<int> auto_tt_shape(int n,
+                               int site_min = 9,
+                               int site_cap = 81,
+                               int prefer_order = 3,
+                               int min_order = 2,
+                               int max_order = 7);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility functions
 // ─────────────────────────────────────────────────────────────────────────────
