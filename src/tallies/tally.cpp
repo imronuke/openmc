@@ -110,6 +110,14 @@ Tally::Tally(pugi::xml_node node)
   if (check_for_node(node, "higher_moments")) {
     higher_moments_ = get_node_value_bool(node, "higher_moments");
   }
+
+  if (check_for_node(node, "tt_eps")) {
+    tt_eps_ = std::stod(get_node_value(node, "tt_eps"));
+    if (tt_eps_ <= 0.0) {
+      fatal_error("Tensor-train tally epsilon must be greater than zero.");
+    }
+    use_tt_ = true;
+  }
   // =======================================================================
   // READ DATA FOR FILTERS
 
