@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <vector>
 #include <optional>
 #include <string>
@@ -146,6 +147,10 @@ TT tt_zeros(const std::vector<int>& shape);
 // ─────────────────────────────────────────────────────────────────────────────
 
 double compute_compression_ratio(const TT& tt);
+
+std::size_t tt_storage_size(const TT& tt);
+
+std::size_t tt_storage_bytes(const TT& tt);
 
 // original: flat row-major buffer matching tt.shape()
 double compute_relative_error(const std::vector<double>& original, const TT& tt);

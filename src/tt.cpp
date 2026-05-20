@@ -789,9 +789,18 @@ TT tt_zeros(const std::vector<int>& shape) {
 double compute_compression_ratio(const TT& tt) {
     int original_size = 1;
     for (int n : tt.shape()) original_size *= n;
-    int tt_size = 0;
-    for (const auto& c : tt.cores) tt_size += c.size();
+    auto tt_size = tt_storage_size(tt);
     return static_cast<double>(original_size) / tt_size;
+}
+
+std::size_t tt_storage_size(const TT& tt) {
+    std::size_t size = 0;
+    for (const auto& c : tt.cores) size += c.data.size();
+    return size;
+}
+
+std::size_t tt_storage_bytes(const TT& tt) {
+    return tt_storage_size(tt) * sizeof(double);
 }
 
 double compute_relative_error(const std::vector<double>& original, const TT& tt) {

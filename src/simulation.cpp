@@ -193,7 +193,7 @@ int openmc_simulation_finalize()
   simulation::total_gen += simulation::current_batch * settings::gen_per_batch;
 
   if (using_tally_tt()) {
-    materialize_tally_tt_results();
+    reconstruct_tally_tt_results();
   }
 
 #ifdef OPENMC_MPI
@@ -476,7 +476,7 @@ void finalize_batch()
     simulation::satisfy_triggers;
 
   if (final_tally_results && using_tally_tt()) {
-    materialize_tally_tt_results();
+    reconstruct_tally_tt_results();
   }
 
   // 2. determines if we need to write a statepoint 
@@ -491,7 +491,7 @@ void finalize_batch()
     if (!warned_tt_statepoint) {
       warning("Skipping intermediate statepoint writes with tensor-train "
               "tally accumulation because dense tally sums are not "
-              "materialized until the final result boundary.");
+              "reconstructed until the final result boundary.");
       warned_tt_statepoint = true;
     }
     write_statepoint = false;
