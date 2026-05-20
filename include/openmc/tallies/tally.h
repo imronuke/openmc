@@ -169,7 +169,7 @@ public:
   tensor::Tensor<double> results_;
 
   //! Whether to store accumulated SUM/SUM_SQ in tensor-train format.
-  bool use_tt_ {true};
+  bool use_tt_ {false};
 
   //! Tensor-train accumulated SUM.
   TT tt_sum_;
@@ -181,7 +181,7 @@ public:
   vector<int> tt_shape_;
 
   //! Relative TT truncation tolerance.
-  double tt_eps_ {1.0e-8};
+  double tt_eps_ {0.0};
 
   //! True if this tally should be written to statepoint files
   bool writable_ {true};

@@ -79,6 +79,9 @@ class Tally(IDManagerMixin):
         List of tally triggers
     derivative : openmc.TallyDerivative, optional
         A material perturbation derivative to apply to all scores in the tally
+    tt_eps : float, optional
+        Relative tensor-train truncation tolerance. If specified, enables
+        tensor-train tally accumulation for this tally.
 
     Attributes
     ----------
@@ -147,6 +150,9 @@ class Tally(IDManagerMixin):
         compressed data storage
     derivative : openmc.TallyDerivative
         A material perturbation derivative to apply to all scores in the tally.
+    tt_eps : float or None
+        Relative tensor-train truncation tolerance. If None, tensor-train
+        tally accumulation is disabled.
 
     """
 
@@ -155,7 +161,7 @@ class Tally(IDManagerMixin):
 
     def __init__(self, tally_id=None, name='', scores=None, filters=None,
                  nuclides=None, estimator=None, triggers=None,
-                 derivative=None):
+                 derivative=None, tt_eps=None):
         # Initialize Tally class attributes
         self.id = tally_id
         self.name = name
@@ -166,6 +172,7 @@ class Tally(IDManagerMixin):
         self._triggers = cv.CheckedList(openmc.Trigger, 'tally triggers')
         self._derivative = None
         self._multiply_density = True
+        self._tt_eps = None
 
         self._num_realizations = 0
         self._with_summary = False
@@ -198,6 +205,8 @@ class Tally(IDManagerMixin):
             self.triggers = triggers
         if derivative is not None:
             self.derivative = derivative
+        if tt_eps is not None:
+            self.tt_eps = tt_eps
 
     def __eq__(self, other):
         if other.id != self.id:
@@ -224,7 +233,8 @@ class Tally(IDManagerMixin):
             self_nuclides.remove('total')
         if other_nuclides != self_nuclides:
             return False
-        for attr in {'scores', 'triggers', 'derivative', 'multiply_density'}:
+        for attr in {'scores', 'triggers', 'derivative', 'multiply_density',
+                     'tt_eps'}:
             if getattr(other, attr) != getattr(self, attr):
                 return False
         return True
@@ -242,6 +252,8 @@ class Tally(IDManagerMixin):
         parts.append('{: <15}=\t{}'.format('Scores', self.scores))
         parts.append('{: <15}=\t{}'.format('Estimator', self.estimator))
         parts.append('{: <15}=\t{}'.format('Multiply dens.', self.multiply_density))
+        if self.tt_eps is not None:
+            parts.append('{: <15}=\t{}'.format('TT eps', self.tt_eps))
         return '\n\t'.join(parts)
 
     @staticmethod
@@ -289,6 +301,17 @@ class Tally(IDManagerMixin):
     def higher_moments(self, value):
         cv.check_type("higher_moments", value, bool)
         self._higher_moments = value
+
+    @property
+    def tt_eps(self):
+        return self._tt_eps
+
+    @tt_eps.setter
+    def tt_eps(self, value):
+        cv.check_type('tt_eps', value, Real, none_ok=True)
+        if value is not None:
+            cv.check_greater_than('tt_eps', value, 0.0)
+        self._tt_eps = value
 
     @property
     def filters(self):
@@ -1477,6 +1500,10 @@ class Tally(IDManagerMixin):
             subelement = ET.SubElement(element, "higher_moments")
             subelement.text = str(self.higher_moments).lower()
 
+        if self.tt_eps is not None:
+            subelement = ET.SubElement(element, "tt_eps")
+            subelement.text = str(self.tt_eps)
+
         return element
 
     def add_results(self, statepoint: cv.PathLike | openmc.StatePoint):
@@ -1568,6 +1595,10 @@ class Tally(IDManagerMixin):
         if deriv is not None:
             deriv_id = int(deriv)
             tally.derivative = kwargs['derivatives'][deriv_id]
+
+        tt_eps = get_text(elem, "tt_eps")
+        if tt_eps is not None:
+            tally.tt_eps = float(tt_eps)
 
         return tally
 
