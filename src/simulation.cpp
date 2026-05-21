@@ -192,10 +192,6 @@ int openmc_simulation_finalize()
   // Increment total number of generations
   simulation::total_gen += simulation::current_batch * settings::gen_per_batch;
 
-  if (using_tally_tt()) {
-    reconstruct_tally_tt_results();
-  }
-
 #ifdef OPENMC_MPI
   broadcast_results();
 #endif
@@ -470,32 +466,9 @@ void finalize_batch()
 
   // Write out state point if it's been specified for this batch and is not
   // a CMFD run instance
-  // 1. determines whether the current batch is a final result
-  bool final_tally_results =
-    simulation::current_batch == settings::n_max_batches ||
-    simulation::satisfy_triggers;
-
-  if (final_tally_results && using_tally_tt()) {
-    reconstruct_tally_tt_results();
-  }
-
-  // 2. determines if we need to write a statepoint 
   bool write_statepoint =
     contains(settings::statepoint_batch, simulation::current_batch) &&
     !settings::cmfd_run;
-
-  // 3. Provide warning if write_statepoint is true and TT is used.
-  // Also alter write_statepoint to false.
-  if (write_statepoint && using_tally_tt() && !final_tally_results) {
-    static bool warned_tt_statepoint {false};
-    if (!warned_tt_statepoint) {
-      warning("Skipping intermediate statepoint writes with tensor-train "
-              "tally accumulation because dense tally sums are not "
-              "reconstructed until the final result boundary.");
-      warned_tt_statepoint = true;
-    }
-    write_statepoint = false;
-  }
 
   if (write_statepoint) {
     if (contains(settings::sourcepoint_batch, simulation::current_batch) &&

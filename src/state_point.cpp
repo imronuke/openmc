@@ -33,6 +33,72 @@
 
 namespace openmc {
 
+void write_tt(hid_t group, const char* name, const TT& tt)
+{
+  hid_t tt_group = create_group(group, name);
+  int n_cores = static_cast<int>(tt.cores.size());
+  write_dataset(tt_group, "n_cores", n_cores);
+  for (int i = 0; i < n_cores; ++i) {
+    const auto& core = tt.cores[i];
+    vector<int> shape {core.r_left, core.n, core.r_right};
+    auto core_name = fmt::format("core_{}", i);
+    auto shape_name = fmt::format("core_{}_shape", i);
+    write_dataset(tt_group, core_name.c_str(), core.data);
+    write_dataset(tt_group, shape_name.c_str(), shape);
+  }
+  close_group(tt_group);
+}
+
+TT read_tt(hid_t group, const char* name)
+{
+  hid_t tt_group = open_group(group, name);
+  int n_cores;
+  read_dataset(tt_group, "n_cores", n_cores);
+
+  std::vector<Core> cores;
+  cores.reserve(n_cores);
+  for (int i = 0; i < n_cores; ++i) {
+    auto core_name = fmt::format("core_{}", i);
+    auto shape_name = fmt::format("core_{}_shape", i);
+    vector<int> shape;
+    std::vector<double> data;
+    read_dataset(tt_group, shape_name.c_str(), shape);
+    read_dataset(tt_group, core_name.c_str(), data);
+    if (shape.size() != 3) {
+      fatal_error("Tensor-train statepoint core shape must have length 3.");
+    }
+    cores.emplace_back(shape[0], shape[1], shape[2], std::move(data));
+  }
+  close_group(tt_group);
+  return TT(std::move(cores));
+}
+
+void write_tally_tt_results(hid_t tally_group, const Tally& tally)
+{
+  write_attribute(tally_group, "tt_enabled", 1);
+  write_dataset(tally_group, "tt_eps", tally.tt_eps_);
+  write_dataset(tally_group, "tt_shape", tally.tt_shape_);
+  write_tt(tally_group, "tt_sum", tally.tt_sum_);
+  write_tt(tally_group, "tt_sum_sq", tally.tt_sum_sq_);
+}
+
+void read_tally_tt_results(hid_t tally_group, Tally& tally)
+{
+  if (!settings::reduce_tallies) {
+    fatal_error("Tensor-train tally accumulation currently requires "
+                "tally reduction.");
+  }
+  tally.use_tt_ = true;
+  read_dataset(tally_group, "tt_eps", tally.tt_eps_);
+  read_dataset(tally_group, "tt_shape", tally.tt_shape_);
+  tally.tt_sum_ = read_tt(tally_group, "tt_sum");
+  tally.tt_sum_sq_ = read_tt(tally_group, "tt_sum_sq");
+
+  int n_scores = tally.scores_.size() * tally.nuclides_.size();
+  tally.results_ = tensor::Tensor<double>({static_cast<size_t>(tally.n_filter_bins()),
+    static_cast<size_t>(n_scores), size_t {1}});
+}
+
 extern "C" int openmc_statepoint_write(const char* filename, bool* write_source)
 {
   simulation::time_statepoint.start();
@@ -275,9 +341,13 @@ extern "C" int openmc_statepoint_write(const char* filename, bool* write_source)
           // Write results for each bin
           std::string name = "tally " + std::to_string(tally->id_);
           hid_t tally_group = open_group(tallies_group, name.c_str());
-          auto& results = tally->results_;
-          write_tally_results(tally_group, results.shape(0), results.shape(1),
-            results.shape(2), results.data());
+          if (tally->use_tt_) {
+            write_tally_tt_results(tally_group, *tally);
+          } else {
+            auto& results = tally->results_;
+            write_tally_results(tally_group, results.shape(0), results.shape(1),
+              results.shape(2), results.data());
+          }
           close_group(tally_group);
         }
       } else {
@@ -515,9 +585,13 @@ extern "C" int openmc_statepoint_load(const char* filename)
         if (internal) {
           tally->writable_ = false;
         } else {
-          auto& results = tally->results_;
-          read_tally_results(tally_group, results.shape(0), results.shape(1),
-            results.shape(2), results.data());
+          if (attribute_exists(tally_group, "tt_enabled")) {
+            read_tally_tt_results(tally_group, *tally);
+          } else {
+            auto& results = tally->results_;
+            read_tally_results(tally_group, results.shape(0), results.shape(1),
+              results.shape(2), results.data());
+          }
 
           read_dataset(tally_group, "n_realizations", tally->n_realizations_);
           close_group(tally_group);
@@ -769,6 +843,15 @@ void write_unstructured_mesh_results()
 {
 
   for (auto& tally : model::tallies) {
+    if (tally->use_tt_) {
+      static bool warned_tt_umesh {false};
+      if (!warned_tt_umesh && mpi::master) {
+        warning("Skipping unstructured mesh tally output for tensor-train "
+                "tallies.");
+        warned_tt_umesh = true;
+      }
+      continue;
+    }
 
     vector<std::string> tally_scores;
     for (auto filter_idx : tally->filters()) {
@@ -920,6 +1003,10 @@ void write_tally_results_nr(hid_t file_id)
       continue;
     if (!t->writable_)
       continue;
+    if (t->use_tt_) {
+      fatal_error("Tensor-train tally accumulation currently requires "
+                  "tally reduction.");
+    }
 
     if (mpi::master && !attribute_exists(file_id, "tallies_present")) {
       write_attribute(file_id, "tallies_present", 1);

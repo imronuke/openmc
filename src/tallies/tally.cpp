@@ -849,6 +849,11 @@ void Tally::init_results()
 {
   int n_scores = scores_.size() * nuclides_.size();
   if (use_tt_) {
+    if (!settings::reduce_tallies) {
+      fatal_error("Tensor-train tally accumulation requires reduced tallies. "
+                  "Set <no_reduce>false</no_reduce> or omit <no_reduce> in "
+                  "settings.xml.");
+    }
     if (higher_moments_) {
       fatal_error("Tensor-train tally accumulation does not support higher "
                   "moments.");
@@ -1728,6 +1733,11 @@ extern "C" int openmc_tally_results(
   }
 
   const auto& t {model::tallies[index]};
+  if (t->use_tt_) {
+    set_errmsg("Tally results are stored in tensor-train format; use the "
+               "tensor-train tally result API.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
   if (t->results_.size() == 0) {
     set_errmsg("Tally results have not been allocated yet.");
     return OPENMC_E_ALLOCATE;

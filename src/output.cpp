@@ -643,6 +643,36 @@ void write_tallies()
       continue;
     }
 
+    if (tally.use_tt_) {
+      int n_scores = tally.scores_.size() * tally.nuclides_.size();
+      auto dense_bytes = static_cast<std::size_t>(2) * tally.n_filter_bins() *
+                         n_scores * sizeof(double);
+      auto tt_bytes =
+        tt_storage_bytes(tally.tt_sum_) + tt_storage_bytes(tally.tt_sum_sq_);
+      std::string ratio = "inf";
+      if (tt_bytes > 0) {
+        ratio =
+          fmt::format("{:.6g}", static_cast<double>(dense_bytes) / tt_bytes);
+      }
+
+      fmt::print(tallies_out, " Tensor-train tally\n");
+      fmt::print(tallies_out, "  Realizations                  {}\n",
+        tally.n_realizations_);
+      fmt::print(tallies_out, "  TT eps                        {}\n",
+        tally.tt_eps_);
+      fmt::print(tallies_out, "  Dense accumulated storage     {} bytes\n",
+        dense_bytes);
+      fmt::print(tallies_out, "  TT accumulated storage        {} bytes\n",
+        tt_bytes);
+      fmt::print(tallies_out, "  Accumulated compression ratio {}\n",
+        ratio);
+      fmt::print(tallies_out, "  tt_sum                        {}\n",
+        tally.tt_sum_.repr());
+      fmt::print(tallies_out, "  tt_sum_sq                     {}\n\n",
+        tally.tt_sum_sq_.repr());
+      continue;
+    }
+
     // Calculate t-value for confidence intervals
     double t_value = 1;
     if (settings::confidence_intervals) {
