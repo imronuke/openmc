@@ -20,6 +20,17 @@ _VERSION_STATEPOINT = 18
 KineticsParameters = namedtuple("KineticsParameters", ["generation_time", "beta_effective"])
 
 
+def _read_tt_ranks(group):
+    n_cores = int(group['n_cores'][()])
+    ranks = []
+    for i in range(n_cores):
+        shape = group[f'core_{i}_shape'][()]
+        if i == 0:
+            ranks.append(int(shape[0]))
+        ranks.append(int(shape[2]))
+    return tuple(ranks)
+
+
 class StatePoint:
     """State information on a simulation at a certain point in time (at the end
     of a given batch). Statepoints can be used to analyze tally results as well
@@ -443,6 +454,14 @@ class StatePoint:
 
                     tally.estimator = group['estimator'][()].decode()
                     tally.num_realizations = n_realizations
+
+                    if 'tt_enabled' in group.attrs:
+                        tally.tt_eps = float(group['tt_eps'][()])
+                        tally._tt_shape = tuple(int(x) for x in group['tt_shape'][()])
+                        tally._tt_ranks = {
+                            'sum': _read_tt_ranks(group['tt_sum']),
+                            'sum_sq': _read_tt_ranks(group['tt_sum_sq']),
+                        }
 
                     # Read derivative information.
                     if 'derivative' in group:

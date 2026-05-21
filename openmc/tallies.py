@@ -37,6 +37,7 @@ from ._sparse_compat import lil_array
 from ._xml import clean_indentation, get_elem_list, get_text
 from .mixin import IDManagerMixin
 from .mesh import MeshBase
+from .tt import TT
 
 
 # The tally arithmetic product types. The tensor product performs the full
@@ -192,6 +193,11 @@ class Tally(IDManagerMixin):
 
         self._sp_filename = None
         self._results_read = False
+        self._tt_shape = None
+        self._tt_ranks = None
+        self._tt_sum = None
+        self._tt_sum_sq = None
+        self._tt_results_read = False
 
         if filters is not None:
             self.filters = filters
@@ -312,6 +318,18 @@ class Tally(IDManagerMixin):
         if value is not None:
             cv.check_greater_than('tt_eps', value, 0.0)
         self._tt_eps = value
+
+    @property
+    def uses_tt(self) -> bool:
+        return self._tt_shape is not None
+
+    @property
+    def tt_shape(self):
+        return self._tt_shape
+
+    @property
+    def tt_ranks(self):
+        return self._tt_ranks
 
     @property
     def filters(self):
@@ -458,6 +476,11 @@ class Tally(IDManagerMixin):
         with h5py.File(self._sp_filename, 'r') as f:
             # Set number of realizations
             group = f[f'tallies/tally {self.id}']
+            if 'tt_enabled' in group.attrs:
+                raise RuntimeError(
+                    f'Tally ID="{self.id}" is stored in tensor-train format. '
+                    'Use explicit tensor-train reconstruction methods instead.'
+                )
             self._num_realizations = int(group['n_realizations'][()])
 
             for filt in self.filters:
@@ -512,6 +535,120 @@ class Tally(IDManagerMixin):
 
         # Indicate that Tally results have been read
         self._results_read = True
+
+    def _read_tt_results(self):
+        if self._tt_results_read:
+            return
+
+        if not self.uses_tt:
+            raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
+        if self._sp_filename is None:
+            raise RuntimeError(
+                f'Tally ID="{self.id}" is not linked to a statepoint file.'
+            )
+
+        with h5py.File(self._sp_filename, 'r') as f:
+            group = f[f'tallies/tally {self.id}']
+            self._tt_sum = TT.from_hdf5(group['tt_sum'])
+            self._tt_sum_sq = TT.from_hdf5(group['tt_sum_sq'])
+
+        self._tt_results_read = True
+
+    @staticmethod
+    def _flat_to_tt_index(flat_index, tt_shape):
+        index = []
+        for n in reversed(tt_shape):
+            index.append(flat_index % n)
+            flat_index //= n
+        return tuple(reversed(index))
+
+    def get_tt_value(self, filter_index, nuclide_index, score_index, value='mean'):
+        """Return one reconstructed tensor-train tally value.
+
+        Parameters
+        ----------
+        filter_index : int
+            Dense filter-bin index.
+        nuclide_index : int
+            Nuclide-bin index.
+        score_index : int
+            Score-bin index.
+        value : {'mean', 'std_dev', 'rel_err'}
+            Value to reconstruct.
+
+        Returns
+        -------
+        float
+            Reconstructed tally value.
+
+        """
+        cv.check_value('value', value, {'mean', 'std_dev', 'rel_err'})
+        self._read_tt_results()
+
+        dense_score_index = score_index + nuclide_index * self.num_scores
+        flat_index = (
+            filter_index * (self.num_scores * self.num_nuclides) +
+            dense_score_index
+        )
+        tt_index = self._flat_to_tt_index(flat_index, self.tt_shape)
+
+        sum_ = self._tt_sum.at(tt_index)
+        sum_sq = self._tt_sum_sq.at(tt_index)
+        mean = sum_ / self._num_realizations
+
+        if value == 'mean':
+            return mean
+
+        std_dev = 0.0
+        if self._num_realizations > 1 and mean != 0.0:
+            variance = sum_sq / self._num_realizations - mean**2
+            std_dev = sqrt(max(0.0, variance / (self._num_realizations - 1)))
+
+        if value == 'std_dev':
+            return std_dev
+        else:
+            return std_dev / abs(mean) if mean != 0.0 else 0.0
+
+    def get_tt_values(self, scores=[], filters=[], filter_bins=[],
+                      nuclides=[], value='mean'):
+        """Return explicitly reconstructed tensor-train tally values.
+
+        Parameters
+        ----------
+        scores : list of str
+            A list of one or more score strings.
+        filters : Iterable of openmc.FilterMeta
+            An iterable of filter types.
+        filter_bins : list of Iterables
+            A list of filter bins corresponding to ``filters``.
+        nuclides : list of str
+            A list of nuclide name strings.
+        value : {'mean', 'std_dev', 'rel_err'}
+            Value to reconstruct.
+
+        Returns
+        -------
+        numpy.ndarray
+            Reconstructed data indexed by filter bin, nuclide, and score.
+
+        """
+        cv.check_value('value', value, {'mean', 'std_dev', 'rel_err'})
+        if not self.uses_tt:
+            raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
+
+        filter_indices = self.get_filter_indices(filters, filter_bins)
+        nuclide_indices = self.get_nuclide_indices(nuclides)
+        score_indices = self.get_score_indices(scores)
+
+        data = np.empty(
+            (len(filter_indices), len(nuclide_indices), len(score_indices))
+        )
+        for i, filter_index in enumerate(filter_indices):
+            for j, nuclide_index in enumerate(nuclide_indices):
+                for k, score_index in enumerate(score_indices):
+                    data[i, j, k] = self.get_tt_value(
+                        filter_index, nuclide_index, score_index, value)
+        return data
 
     @property
     @ensure_results

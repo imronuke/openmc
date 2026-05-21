@@ -85,8 +85,9 @@ void write_tally_tt_results(hid_t tally_group, const Tally& tally)
 void read_tally_tt_results(hid_t tally_group, Tally& tally)
 {
   if (!settings::reduce_tallies) {
-    fatal_error("Tensor-train tally accumulation currently requires "
-                "tally reduction.");
+    fatal_error("Tensor-train tally accumulation requires reduced tallies. "
+                "Set <no_reduce>false</no_reduce> or omit <no_reduce> in "
+                "settings.xml.");
   }
   tally.use_tt_ = true;
   read_dataset(tally_group, "tt_eps", tally.tt_eps_);
@@ -1004,8 +1005,9 @@ void write_tally_results_nr(hid_t file_id)
     if (!t->writable_)
       continue;
     if (t->use_tt_) {
-      fatal_error("Tensor-train tally accumulation currently requires "
-                  "tally reduction.");
+      fatal_error("Tensor-train tally accumulation requires reduced tallies. "
+                  "Set <no_reduce>false</no_reduce> or omit <no_reduce> in "
+                  "settings.xml.");
     }
 
     if (mpi::master && !attribute_exists(file_id, "tallies_present")) {
