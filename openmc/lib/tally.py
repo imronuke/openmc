@@ -8,6 +8,7 @@ import scipy.stats
 
 from openmc.exceptions import AllocationError, InvalidIDError
 from openmc.data.reaction import REACTION_NAME
+from openmc.tt import TT
 from . import _dll, Nuclide
 from .core import _FortranObjectWithID
 from .error import _error_handler
@@ -53,6 +54,16 @@ _dll.openmc_tally_get_scores.argtypes = [
     c_int32, POINTER(POINTER(c_int)), POINTER(c_int)]
 _dll.openmc_tally_get_scores.restype = c_int
 _dll.openmc_tally_get_scores.errcheck = _error_handler
+_dll.openmc_tally_get_use_tt.argtypes = [c_int32, POINTER(c_bool)]
+_dll.openmc_tally_get_use_tt.restype = c_int
+_dll.openmc_tally_get_use_tt.errcheck = _error_handler
+_dll.openmc_tally_get_tt_n_cores.argtypes = [c_int32, c_int, POINTER(c_int)]
+_dll.openmc_tally_get_tt_n_cores.restype = c_int
+_dll.openmc_tally_get_tt_n_cores.errcheck = _error_handler
+_dll.openmc_tally_get_tt_core.argtypes = [
+    c_int32, c_int, c_int, POINTER(POINTER(c_double)), POINTER(c_int*3)]
+_dll.openmc_tally_get_tt_core.restype = c_int
+_dll.openmc_tally_get_tt_core.errcheck = _error_handler
 _dll.openmc_tally_get_type.argtypes = [c_int32, POINTER(c_int32)]
 _dll.openmc_tally_get_type.restype = c_int
 _dll.openmc_tally_get_type.errcheck = _error_handler
@@ -87,6 +98,9 @@ _dll.openmc_tally_set_nuclides.errcheck = _error_handler
 _dll.openmc_tally_set_scores.argtypes = [c_int32, c_int, POINTER(c_char_p)]
 _dll.openmc_tally_set_scores.restype = c_int
 _dll.openmc_tally_set_scores.errcheck = _error_handler
+_dll.openmc_tally_set_tt_eps.argtypes = [c_int32, c_double]
+_dll.openmc_tally_set_tt_eps.restype = c_int
+_dll.openmc_tally_set_tt_eps.errcheck = _error_handler
 _dll.openmc_tally_set_type.argtypes = [c_int32, c_char_p]
 _dll.openmc_tally_set_type.restype = c_int
 _dll.openmc_tally_set_type.errcheck = _error_handler
@@ -341,6 +355,120 @@ class Tally(_FortranObjectWithID):
         shape = (c_size_t*3)()
         _dll.openmc_tally_results(self._index, data, shape)
         return as_array(data, tuple(shape))
+
+    @property
+    def uses_tt(self):
+        use_tt = c_bool()
+        _dll.openmc_tally_get_use_tt(self._index, use_tt)
+        return use_tt.value
+
+    @property
+    def tt_shape(self):
+        return self.tt_sum.shape
+
+    def _tt(self, which):
+        n_cores = c_int()
+        _dll.openmc_tally_get_tt_n_cores(self._index, which, n_cores)
+        cores = []
+        for i in range(n_cores.value):
+            data = POINTER(c_double)()
+            shape = (c_int*3)()
+            _dll.openmc_tally_get_tt_core(self._index, which, i, data, shape)
+            core_shape = tuple(shape)
+            cores.append(as_array(data, core_shape).copy())
+        return TT(cores)
+
+    @property
+    def tt_sum(self):
+        return self._tt(0)
+
+    @property
+    def tt_sum_sq(self):
+        return self._tt(1)
+
+    @property
+    def tt_ranks(self):
+        return {
+            'sum': self.tt_sum.ranks,
+            'sum_sq': self.tt_sum_sq.ranks,
+        }
+
+    def tt_storage_report(self):
+        if not self.uses_tt:
+            raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
+
+        tt_sum = self.tt_sum
+        tt_sum_sq = self.tt_sum_sq
+        dense_bytes = 2 * int(np.prod(tt_sum.shape)) * np.dtype(np.float64).itemsize
+        tt_bytes = (
+            sum(core.size for core in tt_sum.cores) +
+            sum(core.size for core in tt_sum_sq.cores)
+        ) * np.dtype(np.float64).itemsize
+
+        return {
+            'shape': tt_sum.shape,
+            'dense_accumulated_bytes': dense_bytes,
+            'tt_accumulated_bytes': tt_bytes,
+            'compression_ratio': dense_bytes / tt_bytes if tt_bytes > 0 else np.inf,
+            'tt_sum_ranks': tt_sum.ranks,
+            'tt_sum_sq_ranks': tt_sum_sq.ranks,
+        }
+
+    @staticmethod
+    def _flat_to_tt_index(flat_index, tt_shape):
+        index = []
+        for n in reversed(tt_shape):
+            index.append(flat_index % n)
+            flat_index //= n
+        return tuple(reversed(index))
+
+    def get_tt_value(self, filter_index, nuclide_index, score_index):
+        if not self.uses_tt:
+            raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
+
+        n_scores = len(self.scores)
+        n_nuclides = len(self.nuclides)
+        dense_score_index = score_index + nuclide_index * n_scores
+        flat_index = filter_index * (n_scores * n_nuclides) + dense_score_index
+
+        n = self.num_realizations
+        # self.tt_sum loads the TT cores, so keep one local copy for both shape
+        # lookup and value reconstruction.
+        tt_sum = self.tt_sum
+        tt_index = self._flat_to_tt_index(flat_index, tt_sum.shape)
+        sum_ = tt_sum.at(tt_index)
+        return sum_ / n if n > 0 else sum_
+
+    def get_tt_values(self, filter_indices, nuclide_indices, score_indices):
+        if not self.uses_tt:
+            raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
+
+        filter_indices = list(filter_indices)
+        nuclide_indices = list(nuclide_indices)
+        score_indices = list(score_indices)
+        n_scores = len(self.scores)
+        n_nuclides = len(self.nuclides)
+        tt_sum = self.tt_sum
+        tt_shape = tt_sum.shape
+        n = self.num_realizations
+
+        data = np.empty(
+            (len(filter_indices), len(nuclide_indices), len(score_indices)))
+        for i, filter_index in enumerate(filter_indices):
+            for j, nuclide_index in enumerate(nuclide_indices):
+                for k, score_index in enumerate(score_indices):
+                    dense_score_index = score_index + nuclide_index * n_scores
+                    flat_index = (
+                        filter_index * (n_scores * n_nuclides) +
+                        dense_score_index
+                    )
+                    tt_index = self._flat_to_tt_index(flat_index, tt_shape)
+                    sum_ = tt_sum.at(tt_index)
+                    data[i, j, k] = sum_ / n if n > 0 else sum_
+        return data
+
+    def set_tt_eps(self, eps):
+        _dll.openmc_tally_set_tt_eps(self._index, eps)
 
     @property
     def scores(self):

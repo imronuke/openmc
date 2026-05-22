@@ -52,11 +52,12 @@ class TalliedFissionYieldHelper(FissionYieldHelper):
 
     _upper_energy = 20.0e6  # upper energy for tallies
 
-    def __init__(self, chain_nuclides):
+    def __init__(self, chain_nuclides, tt_eps=None):
         super().__init__(chain_nuclides)
         self._local_indexes = None
         self._fission_rate_tally = None
         self._tally_nucs = []
+        self._tt_eps = tt_eps
         self.results = None
 
     def generate_tallies(self, materials, mat_indexes):
@@ -109,6 +110,8 @@ class TalliedFissionYieldHelper(FissionYieldHelper):
         nuclides = sorted(overlap)
         self._tally_nucs = [self._chain_nuclides[n] for n in nuclides]
         self._fission_rate_tally.nuclides = nuclides
+        if nuclides and self._tt_eps is not None:
+            self._fission_rate_tally.set_tt_eps(self._tt_eps)
         return nuclides
 
     @abstractmethod
@@ -145,9 +148,10 @@ class DirectReactionRateHelper(ReactionRateHelper):
     nuclides : list of str
         All nuclides with desired reaction rates.
     """
-    def __init__(self, n_nuc, n_react):
+    def __init__(self, n_nuc, n_react, tt_eps=None):
         super().__init__(n_nuc, n_react)
         self._rate_tally = None
+        self._tt_eps = tt_eps
 
         # Automatically pre-calculate reaction rates for depletion
         openmc.lib.settings.need_depletion_rx = True
@@ -177,6 +181,8 @@ class DirectReactionRateHelper(ReactionRateHelper):
         self._rate_tally.scores = scores
         self._rate_tally.filters = [MaterialFilter(materials)]
         self._rate_tally.multiply_density = False
+        if self._tt_eps is not None:
+            self._rate_tally.set_tt_eps(self._tt_eps)
         self._rate_tally_means_cache = None
 
     @property
@@ -216,6 +222,13 @@ class DirectReactionRateHelper(ReactionRateHelper):
             reaction rates in this material
         """
         self._results_cache.fill(0.0)
+        if self._rate_tally.uses_tt:
+            for i_tally_nuc, i_nuc in enumerate(nuc_index):
+                for i_tally_rx, i_rx in enumerate(rx_index):
+                    self._results_cache[i_nuc, i_rx] = self._rate_tally.get_tt_value(
+                        mat_index, i_tally_nuc, i_tally_rx)
+            return self._results_cache
+
         full_tally_res = self.rate_tally_means[mat_index]
         for i_tally, (i_nuc, i_rx) in enumerate(product(nuc_index, rx_index)):
             self._results_cache[i_nuc, i_rx] = full_tally_res[i_tally]
@@ -256,11 +269,13 @@ class FluxCollapseHelper(ReactionRateHelper):
         All nuclides with desired reaction rates.
 
     """
-    def __init__(self, n_nucs, n_reacts, energies, reactions=None, nuclides=None):
+    def __init__(self, n_nucs, n_reacts, energies, reactions=None, nuclides=None,
+                 tt_eps=None):
         super().__init__(n_nucs, n_reacts)
         self._energies = asarray(energies)
         self._reactions_direct = list(reactions) if reactions is not None else []
         self._nuclides_direct = list(nuclides) if nuclides is not None else None
+        self._tt_eps = tt_eps
 
     @ReactionRateHelper.nuclides.setter
     def nuclides(self, nuclides):
@@ -302,6 +317,8 @@ class FluxCollapseHelper(ReactionRateHelper):
             EnergyFilter(self._energies)
         ]
         self._flux_tally.scores = ['flux']
+        if self._tt_eps is not None:
+            self._flux_tally.set_tt_eps(self._tt_eps)
         self._flux_tally_means_cache = None
 
         # Create reaction rate tally
@@ -311,6 +328,8 @@ class FluxCollapseHelper(ReactionRateHelper):
             self._rate_tally.scores = self._reactions_direct
             self._rate_tally.filters = [MaterialFilter(materials)]
             self._rate_tally.multiply_density = False
+            if self._tt_eps is not None:
+                self._rate_tally.set_tt_eps(self._tt_eps)
             self._rate_tally_means_cache = None
             if self._nuclides_direct is not None:
                 # check if any direct tally nuclides are requested that are not
@@ -370,15 +389,29 @@ class FluxCollapseHelper(ReactionRateHelper):
         self._results_cache.fill(0.0)
 
         # Get flux for specified material
-        shape = (len(self._materials), len(self._energies) - 1)
-        mean_value = self.flux_tally_means.reshape(shape)
-        flux = mean_value[mat_index]
+        n_energy = len(self._energies) - 1
+        if self._flux_tally.uses_tt:
+            flux = zeros(n_energy)
+            for g in range(n_energy):
+                flux[g] = self._flux_tally.get_tt_value(
+                    mat_index * n_energy + g, 0, 0)
+        else:
+            shape = (len(self._materials), n_energy)
+            mean_value = self.flux_tally_means.reshape(shape)
+            flux = mean_value[mat_index]
 
         # Get direct reaction rates
         if self._reactions_direct:
             nuclides_direct = self._rate_tally.nuclides
             shape = (len(nuclides_direct), len(self._reactions_direct))
-            rx_rates = self.rate_tally_means[mat_index].reshape(shape)
+            if self._rate_tally.uses_tt:
+                rx_rates = zeros(shape)
+                for i_nuc in range(shape[0]):
+                    for i_rx in range(shape[1]):
+                        rx_rates[i_nuc, i_rx] = self._rate_tally.get_tt_value(
+                            mat_index, i_nuc, i_rx)
+            else:
+                rx_rates = self.rate_tally_means[mat_index].reshape(shape)
             direct_rx_index = {score: i for i, score in enumerate(self._reactions_direct)}
             direct_nuc_index = {nuc: i for i, nuc in enumerate(nuclides_direct)}
 
@@ -514,10 +547,11 @@ class EnergyScoreHelper(EnergyNormalizationHelper):
 
     """
 
-    def __init__(self, score="heating-local"):
+    def __init__(self, score="heating-local", tt_eps=None):
         super().__init__()
         self.score = score
         self._tally = None
+        self._tt_eps = tt_eps
 
     def prepare(self, *args, **kwargs):
         """Create a tally for system energy production
@@ -529,6 +563,8 @@ class EnergyScoreHelper(EnergyNormalizationHelper):
         self._tally = Tally()
         self._tally.writable = False
         self._tally.scores = [self.score]
+        if self._tt_eps is not None:
+            self._tally.set_tt_eps(self._tt_eps)
 
     def reset(self):
         """Obtain system energy from tally
@@ -540,7 +576,10 @@ class EnergyScoreHelper(EnergyNormalizationHelper):
         """
         super().reset()
         if comm.rank == 0:
-            self._energy = self._tally.mean[0, 0]
+            if self._tally.uses_tt:
+                self._energy = self._tally.get_tt_value(0, 0, 0)
+            else:
+                self._energy = self._tally.mean[0, 0]
 
 
 class SourceRateHelper(NormalizationHelper):
@@ -692,7 +731,7 @@ class FissionYieldCutoffHelper(TalliedFissionYieldHelper):
     """
 
     def __init__(self, chain_nuclides, n_bmats, cutoff=112.0,
-                 thermal_energy=0.0253, fast_energy=500.0e3):
+                 thermal_energy=0.0253, fast_energy=500.0e3, tt_eps=None):
         check_type("cutoff", cutoff, Real)
         check_type("thermal_energy", thermal_energy, Real)
         check_type("fast_energy", fast_energy, Real)
@@ -700,7 +739,7 @@ class FissionYieldCutoffHelper(TalliedFissionYieldHelper):
         check_greater_than("cutoff", cutoff, thermal_energy, equality=False)
         check_greater_than("fast_energy", fast_energy, cutoff, equality=False)
         self.n_bmats = n_bmats
-        super().__init__(chain_nuclides)
+        super().__init__(chain_nuclides, tt_eps=tt_eps)
         self._cutoff = cutoff
         self._thermal_yields = {}
         self._fast_yields = {}
@@ -785,9 +824,20 @@ class FissionYieldCutoffHelper(TalliedFissionYieldHelper):
         if not self._tally_nucs or self._local_indexes.size == 0:
             self.results = None
             return
-        fission_rates = self._fission_rate_tally.mean.reshape(
-            self.n_bmats, 2, len(self._tally_nucs))
-        self.results = fission_rates[self._local_indexes]
+        if self._fission_rate_tally.uses_tt:
+            self.results = zeros(
+                (self._local_indexes.size, 2, len(self._tally_nucs)))
+            for i_mat, mat_index in enumerate(self._local_indexes):
+                for g in range(2):
+                    filter_index = mat_index * 2 + g
+                    for i_nuc in range(len(self._tally_nucs)):
+                        self.results[i_mat, g, i_nuc] = (
+                            self._fission_rate_tally.get_tt_value(
+                                filter_index, i_nuc, 0))
+        else:
+            fission_rates = self._fission_rate_tally.mean.reshape(
+                self.n_bmats, 2, len(self._tally_nucs))
+            self.results = fission_rates[self._local_indexes]
         total_fission = self.results.sum(axis=1)
         nz_mat, nz_nuc = total_fission.nonzero()
         self.results[nz_mat, :, nz_nuc] /= total_fission[nz_mat, newaxis, nz_nuc]
@@ -882,8 +932,8 @@ class AveragedFissionYieldHelper(TalliedFissionYieldHelper):
         tallied nuclides across burnable materials.
     """
 
-    def __init__(self, chain_nuclides):
-        super().__init__(chain_nuclides)
+    def __init__(self, chain_nuclides, tt_eps=None):
+        super().__init__(chain_nuclides, tt_eps=tt_eps)
         self._weighted_tally = None
 
     def generate_tallies(self, materials, mat_indexes):
@@ -939,6 +989,8 @@ class AveragedFissionYieldHelper(TalliedFissionYieldHelper):
         """
         tally_nucs = super().update_tally_nuclides(nuclides)
         self._weighted_tally.nuclides = tally_nucs
+        if tally_nucs and self._tt_eps is not None:
+            self._weighted_tally.set_tt_eps(self._tt_eps)
         return tally_nucs
 
     def unpack(self):
@@ -946,10 +998,23 @@ class AveragedFissionYieldHelper(TalliedFissionYieldHelper):
         if not self._tally_nucs or self._local_indexes.size == 0:
             self.results = None
             return
-        fission_results = (
-            self._fission_rate_tally.mean[self._local_indexes])
-        self.results = (
-            self._weighted_tally.mean[self._local_indexes]).copy()
+        if self._fission_rate_tally.uses_tt:
+            shape = (self._local_indexes.size, len(self._tally_nucs))
+            fission_results = zeros(shape)
+            self.results = zeros(shape)
+            for i_mat, mat_index in enumerate(self._local_indexes):
+                for i_nuc in range(len(self._tally_nucs)):
+                    fission_results[i_mat, i_nuc] = (
+                        self._fission_rate_tally.get_tt_value(
+                            mat_index, i_nuc, 0))
+                    self.results[i_mat, i_nuc] = (
+                        self._weighted_tally.get_tt_value(
+                            mat_index, i_nuc, 0))
+        else:
+            fission_results = (
+                self._fission_rate_tally.mean[self._local_indexes])
+            self.results = (
+                self._weighted_tally.mean[self._local_indexes]).copy()
         nz_mat, nz_nuc = fission_results.nonzero()
         self.results[nz_mat, nz_nuc] /= fission_results[nz_mat, nz_nuc]
 
@@ -1018,4 +1083,4 @@ class AveragedFissionYieldHelper(TalliedFissionYieldHelper):
         -------
         AveragedFissionYieldHelper
         """
-        return cls(operator.chain.nuclides)
+        return cls(operator.chain.nuclides, **kwargs)
