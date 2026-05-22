@@ -1611,6 +1611,24 @@ extern "C" int openmc_tally_set_scores(
   return 0;
 }
 
+extern "C" int openmc_tally_set_tt_eps(int32_t index, double eps)
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  if (eps <= 0.0) {
+    set_errmsg("Tensor-train tally tolerance must be positive.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  auto& tally {model::tallies[index]};
+  tally->use_tt_ = true;
+  tally->tt_eps_ = eps;
+  return 0;
+}
+
 extern "C" int openmc_tally_get_nuclides(int32_t index, int** nuclides, int* n)
 {
   // Make sure the index fits in the array bounds.
@@ -1622,6 +1640,75 @@ extern "C" int openmc_tally_get_nuclides(int32_t index, int** nuclides, int* n)
   *n = model::tallies[index]->nuclides_.size();
   *nuclides = model::tallies[index]->nuclides_.data();
 
+  return 0;
+}
+
+extern "C" int openmc_tally_get_use_tt(int32_t index, bool* use_tt)
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  *use_tt = model::tallies[index]->use_tt_;
+  return 0;
+}
+
+extern "C" int openmc_tally_get_tt_n_cores(
+  int32_t index, int which, int* n)
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  auto& tally {model::tallies[index]};
+  if (!tally->use_tt_) {
+    set_errmsg("Tally is not stored in tensor-train format.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  if (which == 0) {
+    *n = tally->tt_sum_.cores.size();
+  } else if (which == 1) {
+    *n = tally->tt_sum_sq_.cores.size();
+  } else {
+    set_errmsg("Invalid tensor-train result selector.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+  return 0;
+}
+
+extern "C" int openmc_tally_get_tt_core(
+  int32_t index, int which, int core_index, const double** data, int shape[3])
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  auto& tally {model::tallies[index]};
+  if (!tally->use_tt_) {
+    set_errmsg("Tally is not stored in tensor-train format.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  const auto* tt = which == 0 ? &tally->tt_sum_
+                              : which == 1 ? &tally->tt_sum_sq_ : nullptr;
+  if (tt == nullptr) {
+    set_errmsg("Invalid tensor-train result selector.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+  if (core_index < 0 || core_index >= tt->cores.size()) {
+    set_errmsg("Tensor-train core index is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  const auto& core {tt->cores[core_index]};
+  shape[0] = core.r_left;
+  shape[1] = core.n;
+  shape[2] = core.r_right;
+  *data = core.data.data();
   return 0;
 }
 

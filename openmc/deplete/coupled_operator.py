@@ -9,13 +9,14 @@ filesystem.
 """
 
 import copy
+from numbers import Real
 from warnings import warn
 
 import numpy as np
 from uncertainties import ufloat
 
 import openmc
-from openmc.checkvalue import check_value
+from openmc.checkvalue import check_greater_than, check_type, check_value
 from openmc.data import DataLibrary
 from openmc.exceptions import DataError
 import openmc.lib
@@ -159,6 +160,9 @@ class CoupledOperator(OpenMCOperator):
         value of ``None`` implies no limit on the depth.
 
         .. versionadded:: 0.12
+    tt_eps : float, optional
+        If set, internal depletion reaction rate tallies are accumulated in
+        tensor-train format using this tolerance.
     diff_volume_method : str
         Specifies how the volumes of the new materials should be found. Default
         is to 'divide equally' which divides the original material volume
@@ -208,7 +212,7 @@ class CoupledOperator(OpenMCOperator):
                  normalization_mode="fission-q", fission_q=None,
                  fission_yield_mode="constant", fission_yield_opts=None,
                  reaction_rate_mode="direct", reaction_rate_opts=None,
-                 reduce_chain_level=None):
+                 reduce_chain_level=None, tt_eps=None):
 
         # check for old call to constructor
         if isinstance(model, openmc.Geometry):
@@ -230,6 +234,9 @@ class CoupledOperator(OpenMCOperator):
             if fission_q is not None:
                 warn("Fission Q dictionary will not be used")
                 fission_q = None
+        check_type('tt_eps', tt_eps, Real, none_ok=True)
+        if tt_eps is not None:
+            check_greater_than('tt_eps', tt_eps, 0.0)
         self.model = model
 
         # determine set of materials in the model
@@ -249,7 +256,8 @@ class CoupledOperator(OpenMCOperator):
             'normalization_mode': normalization_mode,
             'fission_yield_mode': fission_yield_mode,
             'reaction_rate_opts': reaction_rate_opts,
-            'fission_yield_opts': fission_yield_opts
+            'fission_yield_opts': fission_yield_opts,
+            'tt_eps': tt_eps
         }
 
         # Records how many times the operator has been called
@@ -320,11 +328,13 @@ class CoupledOperator(OpenMCOperator):
         fission_yield_mode = helper_kwargs['fission_yield_mode']
         reaction_rate_opts = helper_kwargs['reaction_rate_opts']
         fission_yield_opts = helper_kwargs['fission_yield_opts']
+        tt_eps = helper_kwargs['tt_eps']
 
         # Get classes to assist working with tallies
         if reaction_rate_mode == "direct":
             self._rate_helper = DirectReactionRateHelper(
-                self.reaction_rates.n_nuc, self.reaction_rates.n_react)
+                self.reaction_rates.n_nuc, self.reaction_rates.n_react,
+                tt_eps=tt_eps)
         elif reaction_rate_mode == "flux":
             # Ensure energy group boundaries were specified
             if 'energies' not in reaction_rate_opts:
@@ -336,6 +346,7 @@ class CoupledOperator(OpenMCOperator):
             self._rate_helper = FluxCollapseHelper(
                 self.reaction_rates.n_nuc,
                 self.reaction_rates.n_react,
+                tt_eps=tt_eps,
                 **reaction_rate_opts
             )
         else:
@@ -345,12 +356,15 @@ class CoupledOperator(OpenMCOperator):
             self._normalization_helper = ChainFissionHelper()
         elif normalization_mode == "energy-deposition":
             score = "heating" if self.model.settings.photon_transport else "heating-local"
-            self._normalization_helper = EnergyScoreHelper(score)
+            self._normalization_helper = EnergyScoreHelper(score, tt_eps=tt_eps)
         else:
             self._normalization_helper = SourceRateHelper()
 
         # Select and create fission yield helper
         fission_helper = self._fission_helpers[fission_yield_mode]
+        if tt_eps is not None and fission_yield_mode != "constant":
+            fission_yield_opts = dict(fission_yield_opts)
+            fission_yield_opts['tt_eps'] = tt_eps
         self._yield_helper = fission_helper.from_operator(
             self, **fission_yield_opts)
 
@@ -446,6 +460,7 @@ class CoupledOperator(OpenMCOperator):
 
         # Extract results
         rates = self._calculate_reaction_rates(source_rate)
+        self._print_tt_storage_reports()
 
         # Get k and uncertainty
         keff = ufloat(*openmc.lib.keff())
@@ -455,6 +470,43 @@ class CoupledOperator(OpenMCOperator):
         self._n_calls += 1
 
         return copy.deepcopy(op_result)
+
+    def _tt_storage_report_items(self):
+        candidates = (
+            ("reaction rates", getattr(self._rate_helper, "_rate_tally", None)),
+            ("multigroup flux", getattr(self._rate_helper, "_flux_tally", None)),
+            ("energy normalization",
+             getattr(self._normalization_helper, "_tally", None)),
+            ("fission yield rates",
+             getattr(self._yield_helper, "_fission_rate_tally", None)),
+            ("weighted fission yield rates",
+             getattr(self._yield_helper, "_weighted_tally", None)),
+        )
+        return [
+            (name, tally.tt_storage_report())
+            for name, tally in candidates
+            if tally is not None and tally.uses_tt
+        ]
+
+    def _print_tt_storage_reports(self):
+        if comm.rank != 0:
+            return
+
+        reports = self._tt_storage_report_items()
+        if not reports:
+            return
+
+        dense_bytes = sum(
+            report['dense_accumulated_bytes'] for _, report in reports)
+        tt_bytes = sum(
+            report['tt_accumulated_bytes'] for _, report in reports)
+
+        print("Tensor-train depletion tally accumulated storage:")
+        print(f"  TT depletion tallies             {len(reports)}")
+        print(f"  dense accumulated storage        {dense_bytes} bytes")
+        print(f"  TT accumulated storage           {tt_bytes} bytes")
+        print("  accumulated compression ratio    "
+              f"{dense_bytes / tt_bytes if tt_bytes > 0 else np.inf:.6g}")
 
     def _update_materials(self):
         """Updates material compositions in OpenMC on all processes."""

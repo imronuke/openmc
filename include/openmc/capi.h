@@ -212,6 +212,10 @@ int openmc_tally_get_filters(int32_t index, const int32_t** indices, size_t* n);
 int openmc_tally_get_n_realizations(int32_t index, int32_t* n);
 int openmc_tally_get_nuclides(int32_t index, int** nuclides, int* n);
 int openmc_tally_get_scores(int32_t index, int** scores, int* n);
+int openmc_tally_get_use_tt(int32_t index, bool* use_tt);
+int openmc_tally_get_tt_n_cores(int32_t index, int which, int* n);
+int openmc_tally_get_tt_core(
+  int32_t index, int which, int core_index, const double** data, int shape[3]);
 int openmc_tally_get_type(int32_t index, int32_t* type);
 int openmc_tally_get_writable(int32_t index, bool* writable);
 int openmc_tally_reset(int32_t index);
@@ -222,6 +226,7 @@ int openmc_tally_set_filters(int32_t index, size_t n, const int32_t* indices);
 int openmc_tally_set_id(int32_t index, int32_t id);
 int openmc_tally_set_nuclides(int32_t index, int n, const char** nuclides);
 int openmc_tally_set_scores(int32_t index, int n, const char** scores);
+int openmc_tally_set_tt_eps(int32_t index, double eps);
 int openmc_tally_set_type(int32_t index, const char* type);
 int openmc_tally_set_writable(int32_t index, bool writable);
 int openmc_get_weight_windows_index(int32_t id, int32_t* idx);
