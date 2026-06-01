@@ -237,6 +237,18 @@ class CoupledOperator(OpenMCOperator):
         check_type('tt_eps', tt_eps, Real, none_ok=True)
         if tt_eps is not None:
             check_greater_than('tt_eps', tt_eps, 0.0)
+            if reaction_rate_mode != "direct":
+                raise ValueError(
+                    "Tensor-train depletion currently requires "
+                    "reaction_rate_mode='direct'.")
+            if normalization_mode != "fission-q":
+                raise ValueError(
+                    "Tensor-train depletion currently requires "
+                    "normalization_mode='fission-q'.")
+            if fission_yield_mode != "constant":
+                raise ValueError(
+                    "Tensor-train depletion currently requires "
+                    "fission_yield_mode='constant'.")
         self.model = model
 
         # determine set of materials in the model
@@ -346,7 +358,6 @@ class CoupledOperator(OpenMCOperator):
             self._rate_helper = FluxCollapseHelper(
                 self.reaction_rates.n_nuc,
                 self.reaction_rates.n_react,
-                tt_eps=tt_eps,
                 **reaction_rate_opts
             )
         else:
@@ -356,15 +367,12 @@ class CoupledOperator(OpenMCOperator):
             self._normalization_helper = ChainFissionHelper()
         elif normalization_mode == "energy-deposition":
             score = "heating" if self.model.settings.photon_transport else "heating-local"
-            self._normalization_helper = EnergyScoreHelper(score, tt_eps=tt_eps)
+            self._normalization_helper = EnergyScoreHelper(score)
         else:
             self._normalization_helper = SourceRateHelper()
 
         # Select and create fission yield helper
         fission_helper = self._fission_helpers[fission_yield_mode]
-        if tt_eps is not None and fission_yield_mode != "constant":
-            fission_yield_opts = dict(fission_yield_opts)
-            fission_yield_opts['tt_eps'] = tt_eps
         self._yield_helper = fission_helper.from_operator(
             self, **fission_yield_opts)
 
@@ -474,13 +482,6 @@ class CoupledOperator(OpenMCOperator):
     def _tt_storage_report_items(self):
         candidates = (
             ("reaction rates", getattr(self._rate_helper, "_rate_tally", None)),
-            ("multigroup flux", getattr(self._rate_helper, "_flux_tally", None)),
-            ("energy normalization",
-             getattr(self._normalization_helper, "_tally", None)),
-            ("fission yield rates",
-             getattr(self._yield_helper, "_fission_rate_tally", None)),
-            ("weighted fission yield rates",
-             getattr(self._yield_helper, "_weighted_tally", None)),
         )
         return [
             (name, tally.tt_storage_report())
