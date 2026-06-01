@@ -422,50 +422,48 @@ class Tally(_FortranObjectWithID):
             flat_index //= n
         return tuple(reversed(index))
 
-    def get_tt_value(self, filter_index, nuclide_index, score_index):
+    @staticmethod
+    def _tt_contract_slice(tt, prefix_index):
+        state = np.array([1.0])
+        for core, i in zip(tt.cores[:len(prefix_index)], prefix_index):
+            if i < 0 or i >= core.shape[1]:
+                raise IndexError("Tensor-train index is out of bounds.")
+            state = state @ core[:, i, :]
+
+        for core in tt.cores[len(prefix_index):]:
+            state = np.tensordot(state, core, axes=([-1], [0]))
+
+        return state[..., 0]
+
+    @staticmethod
+    def _tt_filter_split(tt_shape, score_size):
+        product = 1
+        for i in range(len(tt_shape) - 1, -1, -1):
+            product *= tt_shape[i]
+            if product == score_size:
+                return i
+        raise RuntimeError("Tensor-train shape is incompatible with tally scores.")
+
+    def get_tt_slice(self, filter_index):
         if not self.uses_tt:
             raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
 
         n_scores = len(self.scores)
         n_nuclides = len(self.nuclides)
-        dense_score_index = score_index + nuclide_index * n_scores
-        flat_index = filter_index * (n_scores * n_nuclides) + dense_score_index
-
-        n = self.num_realizations
-        # self.tt_sum loads TT core views, so keep one local reference for both
-        # shape lookup and value reconstruction.
-        tt_sum = self.tt_sum
-        tt_index = self._flat_to_tt_index(flat_index, tt_sum.shape)
-        sum_ = tt_sum.at(tt_index)
-        return sum_ / n if n > 0 else sum_
-
-    def get_tt_values(self, filter_indices, nuclide_indices, score_indices):
-        if not self.uses_tt:
-            raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
-
-        filter_indices = list(filter_indices)
-        nuclide_indices = list(nuclide_indices)
-        score_indices = list(score_indices)
-        n_scores = len(self.scores)
-        n_nuclides = len(self.nuclides)
-        tt_sum = self.tt_sum
-        tt_shape = tt_sum.shape
+        score_size = n_scores * n_nuclides
         n = self.num_realizations
 
-        data = np.empty(
-            (len(filter_indices), len(nuclide_indices), len(score_indices)))
-        for i, filter_index in enumerate(filter_indices):
-            for j, nuclide_index in enumerate(nuclide_indices):
-                for k, score_index in enumerate(score_indices):
-                    dense_score_index = score_index + nuclide_index * n_scores
-                    flat_index = (
-                        filter_index * (n_scores * n_nuclides) +
-                        dense_score_index
-                    )
-                    tt_index = self._flat_to_tt_index(flat_index, tt_shape)
-                    sum_ = tt_sum.at(tt_index)
-                    data[i, j, k] = sum_ / n if n > 0 else sum_
-        return data
+        tt_sum = self.tt_sum
+        split = self._tt_filter_split(tt_sum.shape, score_size)
+        filter_shape = tt_sum.shape[:split]
+        n_filter_bins = int(np.prod(filter_shape))
+        if filter_index < 0 or filter_index >= n_filter_bins:
+            raise IndexError("Tally filter index is out of bounds.")
+
+        prefix_index = self._flat_to_tt_index(filter_index, filter_shape)
+        data = self._tt_contract_slice(tt_sum, prefix_index)
+        data = data.reshape((n_nuclides, n_scores))
+        return data / n if n > 0 else data
 
     def set_tt_eps(self, eps):
         _dll.openmc_tally_set_tt_eps(self._index, eps)
