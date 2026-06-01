@@ -375,7 +375,7 @@ class Tally(_FortranObjectWithID):
             shape = (c_int*3)()
             _dll.openmc_tally_get_tt_core(self._index, which, i, data, shape)
             core_shape = tuple(shape)
-            cores.append(as_array(data, core_shape).copy())
+            cores.append(as_array(data, core_shape))
         return TT(cores)
 
     @property
@@ -432,8 +432,8 @@ class Tally(_FortranObjectWithID):
         flat_index = filter_index * (n_scores * n_nuclides) + dense_score_index
 
         n = self.num_realizations
-        # self.tt_sum loads the TT cores, so keep one local copy for both shape
-        # lookup and value reconstruction.
+        # self.tt_sum loads TT core views, so keep one local reference for both
+        # shape lookup and value reconstruction.
         tt_sum = self.tt_sum
         tt_index = self._flat_to_tt_index(flat_index, tt_sum.shape)
         sum_ = tt_sum.at(tt_index)
