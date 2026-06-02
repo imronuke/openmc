@@ -55,9 +55,13 @@ def _write_tt_hdf5(group, name, tt):
 
 def _get_tt_depletion_rate_write_data(operator, rates):
     """Return TT depletion rate data for HDF5 output."""
+    rate_helper = vars(operator).get('_rate_helper')
+    tt_eps = None if rate_helper is None else vars(rate_helper).get('_tt_eps')
+
     if getattr(rates, 'zero_source', False):
         return {
             'zero_source': True,
+            'tt_eps': tt_eps,
             'normalization_factor': 0.0,
             'n_realizations': 0,
             'tt_shape': tuple(),
@@ -69,6 +73,7 @@ def _get_tt_depletion_rate_write_data(operator, rates):
     tt_sum = tally.tt_sum
     return {
         'zero_source': False,
+        'tt_eps': tt_eps,
         'normalization_factor': rates.normalization_factor,
         'n_realizations': n_realizations,
         'tt_shape': tt_sum.shape,
@@ -82,6 +87,8 @@ def _write_tt_depletion_rates(handle, step, data):
     group.attrs['format_version'] = 1
     group.attrs['stored_values'] = np.bytes_('tally_mean')
     group.attrs['normalization_mode'] = np.bytes_('fission-q')
+    if data['tt_eps'] is not None:
+        group.attrs['tt_eps'] = data['tt_eps']
 
     steps = group.require_group('steps')
     step_name = str(step)
@@ -118,6 +125,11 @@ class TTDepletionRates:
                 raise RuntimeError(
                     "Depletion results file does not contain tensor-train "
                     "depletion reaction rates.")
+
+            tt_group = handle[_TT_DEPLETION_RATES]
+            self.tt_eps = tt_group.attrs.get('tt_eps')
+            if self.tt_eps is not None:
+                self.tt_eps = float(self.tt_eps)
 
             self.index_mat = {}
             self.volume = {}
