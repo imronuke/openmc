@@ -461,8 +461,11 @@ class CoupledOperator(OpenMCOperator):
         # If the source rate is zero, return zero reaction rates without running
         # a transport solve
         if source_rate == 0.0:
-            rates = self.reaction_rates.copy()
-            rates.fill(0.0)
+            if self._tt_depletion_used:
+                rates = _TTReactionRates(0.0, zero_source=True)
+            else:
+                rates = self.reaction_rates.copy()
+                rates.fill(0.0)
             return OperatorResult(ufloat(0.0, 0.0), rates)
 
         # Run OpenMC
