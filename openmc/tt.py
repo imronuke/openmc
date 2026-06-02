@@ -6,6 +6,14 @@ import h5py
 import numpy as np
 
 
+def _flat_to_tt_index(flat_index, tt_shape):
+    index = []
+    for n in reversed(tt_shape):
+        index.append(flat_index % n)
+        flat_index //= n
+    return tuple(reversed(index))
+
+
 class TT:
     """Tensor-train data represented by a sequence of cores.
 
@@ -59,3 +67,15 @@ class TT:
     def values(self, indices: Iterable[Iterable[int]]) -> np.ndarray:
         """Return tensor entries for multiple indices."""
         return np.array([self.at(index) for index in indices])
+
+    def _contract_slice(self, prefix_index):
+        state = np.array([1.0])
+        for core, i in zip(self.cores[:len(prefix_index)], prefix_index):
+            if i < 0 or i >= core.shape[1]:
+                raise IndexError("Tensor-train index is out of bounds.")
+            state = state @ core[:, i, :]
+
+        for core in self.cores[len(prefix_index):]:
+            state = np.tensordot(state, core, axes=([-1], [0]))
+
+        return state[..., 0]

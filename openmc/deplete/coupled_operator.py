@@ -29,6 +29,7 @@ from .helpers import (
     DirectReactionRateHelper, ChainFissionHelper, ConstantFissionYieldHelper,
     FissionYieldCutoffHelper, AveragedFissionYieldHelper, EnergyScoreHelper,
     SourceRateHelper, FluxCollapseHelper)
+from .tt_depletion import _TTReactionRates, _prepare_tt_reaction_rates
 
 
 __all__ = ["CoupledOperator", "Operator", "OperatorResult"]
@@ -468,8 +469,12 @@ class CoupledOperator(OpenMCOperator):
         openmc.lib.run()
 
         # Extract results
-        rates = self._calculate_reaction_rates(source_rate)
-        self._print_tt_storage_reports()
+        if self._tt_depletion_used:
+            rates = _TTReactionRates(
+                _prepare_tt_reaction_rates(self, source_rate))
+            self._print_tt_storage_reports()
+        else:
+            rates = self._calculate_reaction_rates(source_rate)
 
         # Get k and uncertainty
         keff = ufloat(*openmc.lib.keff())
@@ -480,31 +485,15 @@ class CoupledOperator(OpenMCOperator):
 
         return copy.deepcopy(op_result)
 
-    def _tt_storage_report_items(self):
-        candidates = (
-            ("reaction rates", getattr(self._rate_helper, "_rate_tally", None)),
-        )
-        return [
-            (name, tally.tt_storage_report())
-            for name, tally in candidates
-            if tally is not None and tally.uses_tt
-        ]
-
     def _print_tt_storage_reports(self):
         if comm.rank != 0:
             return
 
-        reports = self._tt_storage_report_items()
-        if not reports:
-            return
-
-        dense_bytes = sum(
-            report['dense_accumulated_bytes'] for _, report in reports)
-        tt_bytes = sum(
-            report['tt_accumulated_bytes'] for _, report in reports)
+        report = self._rate_helper._rate_tally.tt_storage_report()
+        dense_bytes = report['dense_accumulated_bytes']
+        tt_bytes = report['tt_accumulated_bytes']
 
         print("Tensor-train depletion tally accumulated storage:")
-        print(f"  TT depletion tallies             {len(reports)}")
         print(f"  dense accumulated storage        {dense_bytes} bytes")
         print(f"  TT accumulated storage           {tt_bytes} bytes")
         print("  accumulated compression ratio    "

@@ -938,6 +938,12 @@ class Integrator(ABC):
 
             .. versionadded:: 0.15.3
         """
+        if (write_rates and
+                getattr(self.operator, '_tt_depletion_used', False) is True):
+            raise ValueError(
+                "Writing reaction rates is not supported when tensor-train "
+                "depletion is enabled.")
+
         with change_directory(self.operator.output_dir):
             n = self.operator.initial_condition()
             t, self._i_res = self._get_start_data()

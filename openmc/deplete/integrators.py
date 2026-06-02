@@ -6,6 +6,7 @@ from ._matrix_funcs import (
     cf4_f1, cf4_f2, cf4_f3, cf4_f4, celi_f1, celi_f2,
     leqi_f1, leqi_f2, leqi_f3, leqi_f4, rk4_f1, rk4_f4
 )
+from .tt_depletion import timed_tt_deplete
 
 __all__ = [
     "PredictorIntegrator", "CECMIntegrator", "CF4Integrator",
@@ -50,6 +51,12 @@ class PredictorIntegrator(Integrator):
             Concentrations at end of interval
 
         """
+        if getattr(rates, '_tt_reaction_rates', False) is True:
+            proc_time, n_end = timed_tt_deplete(
+                self._solver, self.chain, self.operator, n, rates, dt, _i,
+                self.substeps, self.transfer_rates, self.external_source_rates)
+            return proc_time, n_end
+
         proc_time, n_end = self._timed_deplete(n, rates, dt, _i)
         return proc_time, n_end
 
