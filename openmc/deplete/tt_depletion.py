@@ -3,12 +3,27 @@
 import time
 from itertools import repeat
 
+import h5py
 import numpy as np
 
-from openmc.tt import TT
+from openmc.tt import TT, _flat_to_tt_index
+
+from .reaction_rates import ReactionRates
+
+
+__all__ = ["TTDepletionRates"]
 
 
 _TT_DEPLETION_RATES = "tt_depletion_reaction_rates"
+
+
+def _tt_filter_split(tt_shape, score_size):
+    product = 1
+    for i in range(len(tt_shape) - 1, -1, -1):
+        product *= tt_shape[i]
+        if product == score_size:
+            return i
+    raise RuntimeError("Tensor-train shape is incompatible with tally scores.")
 
 
 class _TTReactionRates:
@@ -83,6 +98,124 @@ def _write_tt_depletion_rates(handle, step, data):
 
     if not data['zero_source']:
         _write_tt_hdf5(step_group, 'tt_mean', data['tt_mean'])
+
+
+class TTDepletionRates:
+    """Reader for tensor-train depletion reaction rates.
+
+    Parameters
+    ----------
+    filename : str, optional
+        Path to depletion results file with tensor-train depletion reaction
+        rates.
+
+    """
+
+    def __init__(self, filename='depletion_results.h5'):
+        self.filename = filename
+        with h5py.File(filename, 'r') as handle:
+            if _TT_DEPLETION_RATES not in handle:
+                raise RuntimeError(
+                    "Depletion results file does not contain tensor-train "
+                    "depletion reaction rates.")
+
+            self.index_mat = {}
+            self.volume = {}
+            self.index_nuc = {}
+            self.index_rx = {}
+
+            for mat, mat_group in handle['materials'].items():
+                self.index_mat[mat] = mat_group.attrs['index']
+                self.volume[mat] = mat_group.attrs['volume']
+
+            for nuc, nuc_group in handle['nuclides'].items():
+                if "reaction rate index" in nuc_group.attrs:
+                    self.index_nuc[nuc] = nuc_group.attrs[
+                        "reaction rate index"]
+
+            if "reactions" in handle:
+                for rx, rx_group in handle['reactions'].items():
+                    self.index_rx[rx] = rx_group.attrs['index']
+
+            if not self.index_nuc or not self.index_rx:
+                raise RuntimeError(
+                    "Tensor-train depletion reaction-rate metadata is "
+                    "incomplete.")
+
+            self.n_steps = handle['number'].shape[0]
+
+    def _normalize_step(self, step):
+        if step < 0:
+            step += self.n_steps
+        if step < 0 or step >= self.n_steps:
+            raise IndexError("Depletion step index is out of bounds.")
+        return step
+
+    def _empty_material_rates(self, mat):
+        rates = ReactionRates(
+            {mat: 0}, self.index_nuc, self.index_rx, from_results=True)[0]
+        rates.fill(0.0)
+        return rates
+
+    def get_material_rates(self, step, mat):
+        """Return reaction rates for one material at one depletion step.
+
+        Parameters
+        ----------
+        step : int
+            Depletion step index.
+        mat : str or int
+            Material ID.
+
+        Returns
+        -------
+        numpy.ndarray
+            Reaction rates with shape ``(n_nuclides, n_reactions)``.
+
+        """
+        step = self._normalize_step(step)
+        mat = str(mat)
+        mat_index = self.index_mat[mat]
+
+        with h5py.File(self.filename, 'r') as handle:
+            step_group = handle[
+                f'{_TT_DEPLETION_RATES}/steps/{step}']
+            if step_group.attrs['zero_source']:
+                return self._empty_material_rates(mat)
+
+            tt_shape = tuple(int(x) for x in step_group['tt_shape'][()])
+            score_size = len(self.index_nuc) * len(self.index_rx)
+            split = _tt_filter_split(tt_shape, score_size)
+            filter_shape = tt_shape[:split]
+            n_filter_bins = int(np.prod(filter_shape))
+            if mat_index < 0 or mat_index >= n_filter_bins:
+                raise IndexError("Material index is out of bounds.")
+
+            prefix_index = _flat_to_tt_index(mat_index, filter_shape)
+            tt_mean = TT.from_hdf5(step_group['tt_mean'])
+            data = tt_mean._contract_slice(prefix_index)
+            data = data.reshape((len(self.index_nuc), len(self.index_rx)))
+
+            material_rates = self._empty_material_rates(mat)
+            material_rates[:] = data
+            material_rates *= (
+                step_group['normalization_factor'][()] /
+                (1e24 * self.volume[mat]))
+            return material_rates
+
+    def get_rate(self, step, mat, nuc, rx):
+        """Return one reaction rate at one depletion step."""
+        rates = self.get_material_rates(step, mat)
+        return rates[self.index_nuc[nuc], self.index_rx[rx]]
+
+    def to_reaction_rates(self, step):
+        """Reconstruct all reaction rates for one depletion step."""
+        step = self._normalize_step(step)
+        rates = ReactionRates(
+            self.index_mat, self.index_nuc, self.index_rx, from_results=True)
+        for mat, i_mat in self.index_mat.items():
+            rates[i_mat] = self.get_material_rates(step, mat)
+        return rates
 
 
 def _tt_rate_indices(operator):

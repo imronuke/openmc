@@ -15,6 +15,7 @@ from .reaction_rates import *
 from .atom_number import *
 from .stepresult import *
 from .results import *
+from .tt_depletion import *
 from .integrators import *
 from .transfer_rates import *
 from .r2s import *
