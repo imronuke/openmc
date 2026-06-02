@@ -649,6 +649,15 @@ class Integrator(ABC):
         self.operator = operator
         self.chain = operator.chain
 
+        # TT depletion only works with PredictorIntegrator.
+        tt_predictor = any(
+            cls.__name__ == 'PredictorIntegrator' for cls in type(self).__mro__)
+        if (getattr(operator, '_tt_depletion_used', False) is True and
+                not tt_predictor):
+            raise ValueError(
+                "Tensor-train depletion is currently only supported with "
+                "PredictorIntegrator.")
+
         # Determine source rate and normalize units to W in using power
         if power is not None:
             source_rates = power
@@ -1020,7 +1029,7 @@ class Integrator(ABC):
             Destination material to where nuclides get fed.
 
         """
-        if getattr(self.operator, '_tt_depletion_used', False):
+        if getattr(self.operator, '_tt_depletion_used', False) is True:
             raise ValueError(
                 "Transfer rates are not supported when tensor-train "
                 "depletion is enabled.")
