@@ -5,14 +5,84 @@ from itertools import repeat
 
 import numpy as np
 
+from openmc.tt import TT
+
+
+_TT_DEPLETION_RATES = "tt_depletion_reaction_rates"
+
 
 class _TTReactionRates:
     """Normalization data for streamed TT reaction-rate slices."""
 
     _tt_reaction_rates = True
 
-    def __init__(self, normalization_factor):
+    def __init__(self, normalization_factor, zero_source=False):
         self.normalization_factor = normalization_factor
+        self.zero_source = zero_source
+
+
+def _copy_tt_mean(tt, n_realizations):
+    """Return a TT copy representing the tally mean."""
+    cores = [core.copy() for core in tt.cores]
+    if n_realizations > 0 and cores:
+        cores[0] /= n_realizations
+    return TT(cores)
+
+
+def _write_tt_hdf5(group, name, tt):
+    """Write a TT object to an HDF5 group."""
+    tt_group = group.create_group(name)
+    tt_group.create_dataset("n_cores", data=len(tt.cores))
+    for i, core in enumerate(tt.cores):
+        tt_group.create_dataset(f"core_{i}_shape", data=np.asarray(core.shape))
+        tt_group.create_dataset(f"core_{i}", data=core.ravel())
+
+
+def _get_tt_depletion_rate_write_data(operator, rates):
+    """Return TT depletion rate data for HDF5 output."""
+    if getattr(rates, 'zero_source', False):
+        return {
+            'zero_source': True,
+            'normalization_factor': 0.0,
+            'n_realizations': 0,
+            'tt_shape': tuple(),
+            'tt_mean': None,
+        }
+
+    tally = operator._rate_helper._rate_tally
+    n_realizations = tally.num_realizations
+    tt_sum = tally.tt_sum
+    return {
+        'zero_source': False,
+        'normalization_factor': rates.normalization_factor,
+        'n_realizations': n_realizations,
+        'tt_shape': tt_sum.shape,
+        'tt_mean': _copy_tt_mean(tt_sum, n_realizations),
+    }
+
+
+def _write_tt_depletion_rates(handle, step, data):
+    """Write per-step TT depletion reaction-rate data to HDF5."""
+    group = handle.require_group(_TT_DEPLETION_RATES)
+    group.attrs['format_version'] = 1
+    group.attrs['stored_values'] = np.bytes_('tally_mean')
+    group.attrs['normalization_mode'] = np.bytes_('fission-q')
+
+    steps = group.require_group('steps')
+    step_name = str(step)
+    if step_name in steps:
+        del steps[step_name]
+    step_group = steps.create_group(step_name)
+    step_group.attrs['zero_source'] = data['zero_source']
+    step_group.create_dataset(
+        'normalization_factor', data=data['normalization_factor'])
+    step_group.create_dataset(
+        'n_realizations', data=data['n_realizations'])
+    step_group.create_dataset(
+        'tt_shape', data=np.asarray(data['tt_shape'], dtype=np.int64))
+
+    if not data['zero_source']:
+        _write_tt_hdf5(step_group, 'tt_mean', data['tt_mean'])
 
 
 def _tt_rate_indices(operator):
@@ -101,9 +171,17 @@ def timed_tt_deplete(
                 len(fission_yields), len(n)))
 
     results = []
+    zero_rates = None
+    if getattr(rates, 'zero_source', False):
+        zero_rates = operator.reaction_rates[0].copy()
+        zero_rates.fill(0.0)
+
     for mat, n_mat, yields in zip(operator.local_mats, n, fission_yields):
-        mat_rates = _get_tt_reaction_rates(
-            operator, mat, rates.normalization_factor)
+        if zero_rates is None:
+            mat_rates = _get_tt_reaction_rates(
+                operator, mat, rates.normalization_factor)
+        else:
+            mat_rates = zero_rates
         matrix = chain.form_matrix(mat_rates, yields)
         n_result = solver(matrix, n_mat, dt, substeps)
         n_result.clip(min=0.0, out=n_result)

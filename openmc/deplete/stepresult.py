@@ -16,6 +16,8 @@ from openmc.checkvalue import PathLike
 from openmc.mpi import MPI, comm
 
 from .reaction_rates import ReactionRates
+from .tt_depletion import (
+    _get_tt_depletion_rate_write_data, _write_tt_depletion_rates)
 
 VERSION_RESULTS = (1, 3)
 
@@ -77,6 +79,7 @@ class StepResult:
 
         self.data = None
         self.keff_search_root = None
+        self.tt_rates = None
 
     def __repr__(self):
         t = self.time[0]
@@ -353,7 +356,8 @@ class StepResult:
                               chunks=True,
                               dtype='float64')
 
-        if include_rates and n_nuc_rxn > 0 and n_rxn > 0:
+        if (include_rates and self.tt_rates is None and
+                n_nuc_rxn > 0 and n_rxn > 0):
             handle.create_dataset(
                 "reaction rates", (1, n_mats, n_nuc_rxn, n_rxn),
                 maxshape=(None, n_mats, n_nuc_rxn, n_rxn),
@@ -456,6 +460,8 @@ class StepResult:
         number_dset[index, low:high+1] = self.data
         if has_reactions:
             rxn_dset[index, low:high+1] = self.rates
+        if self.tt_rates and comm.rank == 0:
+            _write_tt_depletion_rates(handle, index, self.tt_rates)
         if comm.rank == 0:
             eigenvalues_dset[index] = self.k
             time_dset[index] = self.time
@@ -541,10 +547,11 @@ class StepResult:
             ind_atom = nuc_handle.attrs["atom number index"]
             results.index_nuc[nuc] = ind_atom
 
-            if "reaction rate index" in nuc_handle.attrs:
+            if ("reaction rates" in handle and
+                    "reaction rate index" in nuc_handle.attrs):
                 rxn_nuc_to_ind[nuc] = nuc_handle.attrs["reaction rate index"]
 
-        if "reactions" in handle:
+        if "reaction rates" in handle and "reactions" in handle:
             for rxn, rxn_handle in handle["/reactions"].items():
                 rxn_to_ind[rxn] = rxn_handle.attrs["index"]
 
@@ -619,7 +626,16 @@ class StepResult:
             results.k = (None, None)
         else:
             results.k = (op_results.k.nominal_value, op_results.k.std_dev)
-        results.rates = op_results.rates
+        if (write_rates and
+                getattr(op, '_tt_depletion_used', False) is True):
+            results.rates = op.reaction_rates
+            # Empty dict marks TT mode on non-root ranks without carrying cores.
+            results.tt_rates = {}
+            if comm.rank == 0:
+                results.tt_rates = _get_tt_depletion_rate_write_data(
+                    op, op_results.rates)
+        else:
+            results.rates = op_results.rates
         results.time = t
         results.source_rate = source_rate
         results.proc_time = proc_time
