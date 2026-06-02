@@ -8,7 +8,7 @@ import scipy.stats
 
 from openmc.exceptions import AllocationError, InvalidIDError
 from openmc.data.reaction import REACTION_NAME
-from openmc.tt import TT
+from openmc.tt import TT, _flat_to_tt_index
 from . import _dll, Nuclide
 from .core import _FortranObjectWithID
 from .error import _error_handler
@@ -415,27 +415,6 @@ class Tally(_FortranObjectWithID):
         }
 
     @staticmethod
-    def _flat_to_tt_index(flat_index, tt_shape):
-        index = []
-        for n in reversed(tt_shape):
-            index.append(flat_index % n)
-            flat_index //= n
-        return tuple(reversed(index))
-
-    @staticmethod
-    def _tt_contract_slice(tt, prefix_index):
-        state = np.array([1.0])
-        for core, i in zip(tt.cores[:len(prefix_index)], prefix_index):
-            if i < 0 or i >= core.shape[1]:
-                raise IndexError("Tensor-train index is out of bounds.")
-            state = state @ core[:, i, :]
-
-        for core in tt.cores[len(prefix_index):]:
-            state = np.tensordot(state, core, axes=([-1], [0]))
-
-        return state[..., 0]
-
-    @staticmethod
     def _tt_filter_split(tt_shape, score_size):
         product = 1
         for i in range(len(tt_shape) - 1, -1, -1):
@@ -460,8 +439,8 @@ class Tally(_FortranObjectWithID):
         if filter_index < 0 or filter_index >= n_filter_bins:
             raise IndexError("Tally filter index is out of bounds.")
 
-        prefix_index = self._flat_to_tt_index(filter_index, filter_shape)
-        data = self._tt_contract_slice(tt_sum, prefix_index)
+        prefix_index = _flat_to_tt_index(filter_index, filter_shape)
+        data = tt_sum._contract_slice(prefix_index)
         data = data.reshape((n_nuclides, n_scores))
         return data / n if n > 0 else data
 
