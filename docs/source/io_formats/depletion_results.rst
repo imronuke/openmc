@@ -21,7 +21,7 @@ The current version of the depletion results file format is 1.3.
            - **reaction rates** (*double[][][][]*) -- Reaction rates at each
              timestep. This array has shape (number of timesteps, number of
              materials, number of nuclides, number of reactions). Only stored if
-             write_rates=True.
+             write_rates=True for non-tensor-train depletion.
            - **time** (*double[][2]*) -- Time in [s] at beginning/end of each
              step.
            - **source_rate** (*double[]*) -- Power in [W] or source rate in
@@ -48,3 +48,30 @@ The current version of the depletion results file format is 1.3.
 **/reactions/<name>/**
 
 :Attributes: - **index** (*int*) -- Index user in results for this reaction
+
+**/tt_depletion_reaction_rates/**
+
+:Attributes: - **format_version** (*int*) -- Version of the tensor-train
+               depletion reaction-rate storage format.
+             - **stored_values** (*char[]*) -- Indicates the stored tensor-train
+               values. Currently ``tally_mean``.
+             - **normalization_mode** (*char[]*) -- Depletion normalization mode
+               used with the stored tensor-train tally values.
+
+**/tt_depletion_reaction_rates/steps/<step>/**
+
+:Attributes: - **zero_source** (*bool*) -- Whether this step corresponds to a
+               zero-source operator evaluation with no tensor-train tally cores.
+
+:Datasets: - **normalization_factor** (*double*) -- Factor needed to normalize
+             reconstructed tally means to depletion reaction rates.
+           - **n_realizations** (*int*) -- Number of realizations used to
+             convert the raw tensor-train tally sum to a mean.
+           - **tt_shape** (*int[]*) -- Shape of the tensor-train tally.
+
+**/tt_depletion_reaction_rates/steps/<step>/tt_mean/**
+
+:Datasets: - **n_cores** (*int*) -- Number of tensor-train cores.
+           - **core_<i>_shape** (*int[3]*) -- Shape of tensor-train core
+             ``i``.
+           - **core_<i>** (*double[]*) -- Flattened tensor-train core ``i``.
