@@ -1020,6 +1020,11 @@ class Integrator(ABC):
             Destination material to where nuclides get fed.
 
         """
+        if getattr(self.operator, '_tt_depletion_used', False):
+            raise ValueError(
+                "Transfer rates are not supported when tensor-train "
+                "depletion is enabled.")
+
         if self.transfer_rates is None:
             if hasattr(self.operator, 'model'):
                 materials = self.operator.model.materials

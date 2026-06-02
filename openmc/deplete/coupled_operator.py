@@ -249,6 +249,7 @@ class CoupledOperator(OpenMCOperator):
                 raise ValueError(
                     "Tensor-train depletion currently requires "
                     "fission_yield_mode='constant'.")
+        self._tt_depletion_used = tt_eps is not None
         self.model = model
 
         # determine set of materials in the model
