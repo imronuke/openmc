@@ -31,9 +31,12 @@ class _TTReactionRates:
 
     _tt_reaction_rates = True
 
-    def __init__(self, normalization_factor, zero_source=False):
+    def __init__(
+            self, normalization_factor, zero_source=False,
+            reaction_rate_mask=None):
         self.normalization_factor = normalization_factor
         self.zero_source = zero_source
+        self.reaction_rate_mask = reaction_rate_mask
 
 
 def _copy_tt_mean(tt, n_realizations):
@@ -57,11 +60,18 @@ def _get_tt_depletion_rate_write_data(operator, rates):
     """Return TT depletion rate data for HDF5 output."""
     rate_helper = vars(operator).get('_rate_helper')
     tt_eps = None if rate_helper is None else vars(rate_helper).get('_tt_eps')
+    reaction_rate_mask = getattr(rates, 'reaction_rate_mask', None)
+    if reaction_rate_mask is None:
+        reaction_rate_mask = vars(operator).get('_tt_reaction_rate_mask')
+    if reaction_rate_mask is None:
+        reaction_rate_mask = _tt_reaction_rate_mask(
+            operator.chain, operator.reaction_rates)
 
     if getattr(rates, 'zero_source', False):
         return {
             'zero_source': True,
             'tt_eps': tt_eps,
+            'reaction_rate_mask': reaction_rate_mask,
             'normalization_factor': 0.0,
             'n_realizations': 0,
             'tt_shape': tuple(),
@@ -74,6 +84,7 @@ def _get_tt_depletion_rate_write_data(operator, rates):
     return {
         'zero_source': False,
         'tt_eps': tt_eps,
+        'reaction_rate_mask': reaction_rate_mask,
         'normalization_factor': rates.normalization_factor,
         'n_realizations': n_realizations,
         'tt_shape': tt_sum.shape,
@@ -89,6 +100,14 @@ def _write_tt_depletion_rates(handle, step, data):
     group.attrs['normalization_mode'] = np.bytes_('fission-q')
     if data['tt_eps'] is not None:
         group.attrs['tt_eps'] = data['tt_eps']
+    reaction_rate_mask = np.asarray(data['reaction_rate_mask'], dtype=bool)
+    if 'reaction_rate_mask' in group:
+        if not np.array_equal(group['reaction_rate_mask'][()], reaction_rate_mask):
+            raise ValueError(
+                "Tensor-train depletion reaction-rate mask changed between "
+                "depletion steps.")
+    else:
+        group.create_dataset('reaction_rate_mask', data=reaction_rate_mask)
 
     steps = group.require_group('steps')
     step_name = str(step)
@@ -153,6 +172,16 @@ class TTDepletionRates:
                 raise RuntimeError(
                     "Tensor-train depletion reaction-rate metadata is "
                     "incomplete.")
+
+            if 'reaction_rate_mask' not in tt_group:
+                raise RuntimeError(
+                    "Tensor-train depletion reaction-rate mask is missing.")
+            self.reaction_rate_mask = tt_group['reaction_rate_mask'][()]
+            expected_shape = (len(self.index_nuc), len(self.index_rx))
+            if self.reaction_rate_mask.shape != expected_shape:
+                raise RuntimeError(
+                    "Tensor-train depletion reaction-rate mask shape is "
+                    "incompatible with reaction-rate metadata.")
 
             self.n_steps = handle['number'].shape[0]
 
@@ -238,11 +267,27 @@ def _tt_rate_indices(operator):
     return rxn_nuclides, nuc_ind, rx_ind
 
 
+def _tt_reaction_rate_mask(chain, rates):
+    """Return mask for nuclide/reaction pairs present in the depletion chain."""
+    mask = np.zeros((rates.n_nuc, rates.n_react), dtype=bool)
+    for nuc in chain.nuclides:
+        i_nuc = rates.index_nuc.get(nuc.name)
+        if i_nuc is None:
+            continue
+        for reaction in nuc.reactions:
+            i_rx = rates.index_rx.get(reaction.type)
+            if i_rx is not None:
+                mask[i_nuc, i_rx] = True
+    return mask
+
+
 def _prepare_tt_reaction_rates(operator, source_rate):
     """Prepare fission-Q normalization for TT material rate slices."""
     rates = operator.reaction_rates
     rxn_nuclides, nuc_ind, rx_ind = _tt_rate_indices(operator)
     fission_ind = rates.index_rx.get("fission")
+    reaction_rate_mask = _tt_reaction_rate_mask(operator.chain, rates)
+    operator._tt_reaction_rate_mask = reaction_rate_mask
 
     operator._normalization_helper.reset()
     operator._yield_helper.unpack()
@@ -268,6 +313,9 @@ def _prepare_tt_reaction_rates(operator, source_rate):
             np.multiply(
                 tally_rates[:, fission_ind], fission_rates,
                 out=fission_rates)
+            np.multiply(
+                fission_rates, reaction_rate_mask[:, fission_ind],
+                out=fission_rates)
             operator._normalization_helper.update(fission_rates)
 
     operator.chain.fission_yields = fission_yields
@@ -288,6 +336,11 @@ def _get_tt_reaction_rates(operator, mat, normalization_factor):
     np.multiply(
         tally_rates, normalization_factor / volume_b_cm,
         out=material_rates)
+    reaction_rate_mask = vars(operator).get('_tt_reaction_rate_mask')
+    if reaction_rate_mask is None:
+        reaction_rate_mask = _tt_reaction_rate_mask(operator.chain, rates)
+        operator._tt_reaction_rate_mask = reaction_rate_mask
+    np.multiply(material_rates, reaction_rate_mask, out=material_rates)
     return material_rates
 
 
@@ -317,6 +370,9 @@ def timed_tt_deplete(
 
     results = []
     zero_rates = None
+    reaction_rate_mask = getattr(rates, 'reaction_rate_mask', None)
+    if reaction_rate_mask is not None:
+        operator._tt_reaction_rate_mask = reaction_rate_mask
     if getattr(rates, 'zero_source', False):
         zero_rates = operator.reaction_rates[0].copy()
         zero_rates.fill(0.0)
