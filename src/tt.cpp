@@ -527,15 +527,16 @@ void TT::round(std::optional<std::vector<int>> ranks_opt,
         Eigen::VectorXd S  = svd.S.head(r_new);
         Eigen::MatrixXd Vt = svd.Vt.topRows(r_new);
 
-        // Update cores[k] with U*S
-        Eigen::MatrixXd US = U * S.asDiagonal();
-        left_mat_to_core(cores[k], US, cores[k].r_left, sh[k], r_new);
+        // Update cores[k] with U and push singular values into the next core.
+        left_mat_to_core(cores[k], U, cores[k].r_left, sh[k], r_new);
 
-        // Push Vt into cores[k+1]
+        // Push S*Vt into cores[k+1]
         // cores[k+1] currently: old_r x (n_{k+1} * r_{k+2})  (right unfolding)
         // Vt: r_new x old_r   ->  new cores[k+1] mat: r_new x (n_{k+1} * r_{k+2})
         Eigen::MatrixXd next_right = core_to_right_mat(cores[k+1]);
         Eigen::MatrixXd new_next   = Vt * next_right;
+        for (int i = 0; i < r_new; ++i)
+            new_next.row(i) *= S(i);
         right_mat_to_core(cores[k+1], new_next, r_new, sh[k+1], cores[k+1].r_right);
     }
 }
@@ -591,21 +592,19 @@ TT tt_svd(const std::vector<double>& tensor,
         Eigen::VectorXd S  = svd.S.head(r_k);
         Eigen::MatrixXd Vt = svd.Vt.topRows(r_k);
 
-        // Store core k: from US matrix (r_prev*n_k) x r_k, row-major
-        // core(i, j, l) = US(i*n_k + j, l)
-        Eigen::MatrixXd US = U * S.asDiagonal();
+        // Store core k from U matrix (r_prev*n_k) x r_k, row-major.
         Core core(r_prev, n_k, r_k);
         for (int i = 0; i < r_prev; ++i)
             for (int j = 0; j < n_k; ++j)
                 for (int l = 0; l < r_k; ++l)
-                    core(i, j, l) = US(i * n_k + j, l);
+                    core(i, j, l) = U(i * n_k + j, l);
         cores.push_back(core);
 
-        // Store Vt as row-major buffer for next iteration
-        // Vt: r_k x cols (ColMajor). Convert to row-major buffer.
+        // Store S*Vt as row-major buffer for next iteration.
         buf.resize(r_k * cols);
-        Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>(
-            buf.data(), r_k, cols) = Vt;
+        for (int i = 0; i < r_k; ++i)
+            for (int j = 0; j < cols; ++j)
+                buf[i * cols + j] = S(i) * Vt(i, j);
 
         r_prev = r_k;
     }
@@ -673,17 +672,17 @@ TT tt_svd_tally_value(const double* value,
         Eigen::VectorXd S  = svd.S.head(r_k);
         Eigen::MatrixXd Vt = svd.Vt.topRows(r_k);
 
-        Eigen::MatrixXd US = U * S.asDiagonal();
         Core core(r_prev, n_k, r_k);
         for (int i = 0; i < r_prev; ++i)
             for (int j = 0; j < n_k; ++j)
                 for (int l = 0; l < r_k; ++l)
-                    core(i, j, l) = US(i * n_k + j, l);
+                    core(i, j, l) = U(i * n_k + j, l);
         cores.push_back(core);
 
         buf.resize(r_k * cols);
-        Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>(
-            buf.data(), r_k, cols) = Vt;
+        for (int i = 0; i < r_k; ++i)
+            for (int j = 0; j < cols; ++j)
+                buf[i * cols + j] = S(i) * Vt(i, j);
 
         r_prev = r_k;
     }
@@ -749,17 +748,17 @@ TT tt_rand(const std::vector<double>& tensor,
             svd.Vt = svd.Vt.topRows(r_k);
         }
 
-        Eigen::MatrixXd US = svd.U * svd.S.asDiagonal();
         Core core(r_prev, n_k, r_k);
         for (int i = 0; i < r_prev; ++i)
             for (int j = 0; j < n_k; ++j)
                 for (int l = 0; l < r_k; ++l)
-                    core(i, j, l) = US(i * n_k + j, l);
+                    core(i, j, l) = svd.U(i * n_k + j, l);
         cores.push_back(core);
 
         buf.resize(r_k * cols);
-        Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>(
-            buf.data(), r_k, cols) = svd.Vt;
+        for (int i = 0; i < r_k; ++i)
+            for (int j = 0; j < cols; ++j)
+                buf[i * cols + j] = svd.S(i) * svd.Vt(i, j);
 
         r_prev = r_k;
     }
