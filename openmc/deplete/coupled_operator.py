@@ -473,8 +473,11 @@ class CoupledOperator(OpenMCOperator):
 
         # Extract results
         if self._tt_depletion_used:
+            normalization_factor = _prepare_tt_reaction_rates(
+                self, source_rate)
+            mask = vars(self).get('_tt_reaction_rate_mask')
             rates = _TTReactionRates(
-                _prepare_tt_reaction_rates(self, source_rate))
+                normalization_factor, reaction_rate_mask=mask)
             self._print_tt_storage_reports()
         else:
             rates = self._calculate_reaction_rates(source_rate)
