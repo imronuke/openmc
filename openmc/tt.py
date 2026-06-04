@@ -79,3 +79,90 @@ class TT:
             state = np.tensordot(state, core, axes=([-1], [0]))
 
         return state[..., 0]
+
+
+def _rank_truncation(singular_values, eps):
+    singular_values = np.asarray(singular_values)
+    total = np.sum(singular_values**2)
+    if total == 0.0:
+        return 1
+
+    tail = 0.0
+    for i in range(singular_values.size - 1, -1, -1):
+        tail += singular_values[i]**2
+        if np.sqrt(tail / total) >= eps:
+            return i + 1
+    return singular_values.size
+
+
+def tt_svd(tensor, shape=None, ranks=None, eps=None):
+    """Construct a tensor train using TT-SVD.
+
+    Parameters
+    ----------
+    tensor : numpy.ndarray or iterable of float
+        Dense tensor data in row-major order.
+    shape : iterable of int, optional
+        Logical tensor shape. If omitted, ``tensor.shape`` is used.
+    ranks : iterable of int, optional
+        Fixed TT ranks with length ``len(shape) - 1``. Mutually exclusive with
+        ``eps``.
+    eps : float, optional
+        Relative singular-value tail tolerance used to truncate ranks. If not
+        specified and ``ranks`` is not specified, a default of ``1.0e-10`` is
+        used.
+
+    Returns
+    -------
+    TT
+        Tensor-train representation of ``tensor``.
+
+    """
+    dense = np.asarray(tensor, dtype=float)
+    if shape is None:
+        shape = dense.shape
+    shape = tuple(int(n) for n in shape)
+    if not shape:
+        raise ValueError("TT-SVD requires a non-empty shape.")
+    if any(n <= 0 for n in shape):
+        raise ValueError("TT-SVD shape dimensions must be positive.")
+    if dense.size != int(np.prod(shape)):
+        raise ValueError("TT-SVD shape is incompatible with tensor size.")
+
+    if ranks is None:
+        ranks = ()
+    else:
+        ranks = tuple(int(r) for r in ranks)
+    if ranks and eps is not None:
+        raise ValueError("Specify either ranks or eps, not both.")
+    if ranks and len(ranks) != len(shape) - 1:
+        raise ValueError("ranks must have length len(shape) - 1.")
+    if not ranks and eps is None:
+        eps = 1.0e-10
+    if eps is not None and eps < 0.0:
+        raise ValueError("eps must be non-negative.")
+
+    buf = dense.reshape(-1, order='C').copy()
+    cores = []
+    r_prev = 1
+
+    for k, n_k in enumerate(shape[:-1]):
+        rows = r_prev * n_k
+        cols = buf.size // rows
+        matrix = buf.reshape((rows, cols), order='C')
+        u, s, vh = np.linalg.svd(matrix, full_matrices=False)
+
+        if ranks:
+            r_k = min(s.size, ranks[k])
+            if r_k <= 0:
+                raise ValueError("TT ranks must be positive.")
+        else:
+            r_k = _rank_truncation(s, eps)
+            r_k = max(1, min(r_k, s.size))
+
+        cores.append(u[:, :r_k].reshape((r_prev, n_k, r_k), order='C'))
+        buf = (s[:r_k, None] * vh[:r_k, :]).reshape(-1, order='C')
+        r_prev = r_k
+
+    cores.append(buf.reshape((r_prev, shape[-1], 1), order='C'))
+    return TT(cores)

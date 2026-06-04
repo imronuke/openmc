@@ -939,6 +939,7 @@ class Integrator(ABC):
             .. versionadded:: 0.15.3
         """
         with change_directory(self.operator.output_dir):
+            tt_depletion_used = getattr(self.operator, '_tt_depletion_used', False)
             n = self.operator.initial_condition()
             t, self._i_res = self._get_start_data()
 
@@ -966,7 +967,11 @@ class Integrator(ABC):
                 )
 
                 # Update for next step
-                n = n_end
+                if tt_depletion_used:
+                    self.operator.number.update_burnable_from_mat_slices(n_end)
+                    n = None
+                else:
+                    n = n_end
                 t += dt
 
             # Final simulation -- in the case that final_step is False, a zero
@@ -976,7 +981,12 @@ class Integrator(ABC):
             if output and final_step and comm.rank == 0:
                 print(f"[openmc.deplete] t={t} (final operator evaluation)")
             if self._keff_search_control is not None and source_rate != 0.0:
-                keff_search_root = self._keff_search_control.run(n)
+                if tt_depletion_used:
+                    keff_input = list(
+                        self.operator.number.get_mat_slice(np.s_[:]))
+                else:
+                    keff_input = n
+                keff_search_root = self._keff_search_control.run(keff_input)
             else:
                 keff_search_root = None
             res_final = self.operator(n, source_rate if final_step else 0.0)

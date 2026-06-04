@@ -15,9 +15,8 @@ import openmc
 from openmc.checkvalue import PathLike
 from openmc.mpi import MPI, comm
 
+from . import tt_depletion as ttd
 from .reaction_rates import ReactionRates
-from .tt_depletion import (
-    _get_tt_depletion_rate_write_data, _write_tt_depletion_rates)
 
 VERSION_RESULTS = (1, 3)
 
@@ -79,6 +78,7 @@ class StepResult:
 
         self.data = None
         self.keff_search_root = None
+        self.tt_eps = None
         self.tt_rates = None
 
     def __repr__(self):
@@ -102,6 +102,7 @@ class StepResult:
             The atoms for mat, nuc
 
         """
+        ttd._require_dense_atom_numbers(self)
         mat, nuc = pos
         if isinstance(mat, openmc.Material):
             mat = str(mat.id)
@@ -351,10 +352,11 @@ class StepResult:
 
         # Construct array storage
 
-        handle.create_dataset("number", (1, n_mats, n_nuc_number),
-                              maxshape=(None, n_mats, n_nuc_number),
-                              chunks=True,
-                              dtype='float64')
+        if self.tt_eps is None:
+            handle.create_dataset("number", (1, n_mats, n_nuc_number),
+                                  maxshape=(None, n_mats, n_nuc_number),
+                                  chunks=True,
+                                  dtype='float64')
 
         if (include_rates and self.tt_rates is None and
                 n_nuc_rxn > 0 and n_rxn > 0):
@@ -394,7 +396,12 @@ class StepResult:
             Whether reaction rate datasets are being written.
 
         """
-        if "/number" not in handle:
+        if self.tt_eps is None:
+            metadata_needed = "/number" not in handle
+        else:
+            metadata_needed = "materials" not in handle
+
+        if metadata_needed:
             if parallel:
                 comm.barrier()
             self._write_hdf5_metadata(handle, write_rates)
@@ -403,7 +410,8 @@ class StepResult:
             comm.barrier()
 
         # Grab handles
-        number_dset = handle["/number"]
+        if self.tt_eps is None:
+            number_dset = handle["/number"]
         has_reactions = ("reaction rates" in handle)
         if has_reactions:
             rxn_dset = handle["/reaction rates"]
@@ -414,15 +422,19 @@ class StepResult:
         keff_search_root_dset = handle["/keff_search_root"]
 
         # Get number of results stored
-        number_shape = list(number_dset.shape)
-        number_results = number_shape[0]
+        if self.tt_eps is None:
+            number_shape = list(number_dset.shape)
+            number_results = number_shape[0]
+        else:
+            number_results = time_dset.shape[0]
 
         new_shape = index + 1
 
         if number_results < new_shape:
             # Extend first dimension by 1
-            number_shape[0] = new_shape
-            number_dset.resize(number_shape)
+            if self.tt_eps is None:
+                number_shape[0] = new_shape
+                number_dset.resize(number_shape)
 
             if has_reactions:
                 rxn_shape = list(rxn_dset.shape)
@@ -457,11 +469,15 @@ class StepResult:
         inds = [self.mat_to_hdf5_ind[mat] for mat in self.index_mat]
         low = min(inds)
         high = max(inds)
-        number_dset[index, low:high+1] = self.data
+        if self.tt_eps is None:
+            number_dset[index, low:high+1] = self.data
+        else:
+            ttd._write_tt_atom_number_result(self, handle, index, low)
         if has_reactions:
             rxn_dset[index, low:high+1] = self.rates
         if self.tt_rates and comm.rank == 0:
-            _write_tt_depletion_rates(handle, index, self.tt_rates)
+            ttd._write_tt_depletion_rates(
+                handle, index, self.tt_rates)
         if comm.rank == 0:
             eigenvalues_dset[index] = self.k
             time_dset[index] = self.time
@@ -486,6 +502,8 @@ class StepResult:
         results = cls()
 
         # Grab handles
+        if "number" not in handle:
+            ttd._raise_dense_atom_number_error()
         number_dset = handle["/number"]
         eigenvalues_dset = handle["/eigenvalues"]
         time_dset = handle["/time"]
@@ -587,8 +605,9 @@ class StepResult:
         ----------
         op : openmc.deplete.abc.TransportOperator
             The operator used to generate these results.
-        x : numpy.array
-            End-of-step concentrations for each material
+        x : numpy.array or None
+            End-of-step concentrations for each material. When TT depletion is
+            enabled, ``None`` stores concentrations from ``op.number``.
         op_results : openmc.deplete.OperatorResult
             Result of applying transport operator at end of step
         t : list of float
@@ -618,21 +637,31 @@ class StepResult:
         results.allocate(vol_dict, nuc_list, burn_list, full_burn_list, name_list)
 
         n_mat = len(burn_list)
+        tt_depletion_used = getattr(op, '_tt_depletion_used', False) is True
 
-        for mat_i in range(n_mat):
-            results[mat_i, :] = x[mat_i]
+        if x is None:
+            if not tt_depletion_used:
+                raise ValueError(
+                    "Dense concentrations are required for non-TT depletion.")
+            ttd._set_tt_step_result_atom_numbers(results, op, burn_list)
+        else:
+            for mat_i in range(n_mat):
+                results[mat_i, :] = x[mat_i]
+
+        if tt_depletion_used:
+            results.tt_eps = getattr(op, '_tt_eps', None)
 
         if isinstance(op_results.k, type(None)):
             results.k = (None, None)
         else:
             results.k = (op_results.k.nominal_value, op_results.k.std_dev)
         if (write_rates and
-                getattr(op, '_tt_depletion_used', False) is True):
+                tt_depletion_used):
             results.rates = op.reaction_rates
             # Empty dict marks TT mode on non-root ranks without carrying cores.
             results.tt_rates = {}
             if comm.rank == 0:
-                results.tt_rates = _get_tt_depletion_rate_write_data(
+                results.tt_rates = ttd._get_tt_depletion_rate_write_data(
                     op, op_results.rates)
         else:
             results.rates = op_results.rates
