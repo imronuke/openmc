@@ -21,7 +21,7 @@ from openmc.data import DataLibrary
 from openmc.exceptions import DataError
 import openmc.lib
 from openmc.mpi import comm
-from openmc.tt import tt_svd
+from openmc.tt import _auto_tt_shape, tt_svd
 from . import tt_depletion as ttd
 from .abc import OperatorResult
 from .openmc_operator import OpenMCOperator
@@ -301,7 +301,7 @@ class CoupledOperator(OpenMCOperator):
             mat: self.number.get_mat_volume(mat)
             for mat in local_mats
         }
-        mat_shape = (len(local_mats),)
+        mat_shape = _auto_tt_shape(len(local_mats)) if local_mats else (0,)
         nuc_shape = (self.number.n_nuc,)
         if local_mats:
             density = self.number.number.copy()
