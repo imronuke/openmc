@@ -294,7 +294,7 @@ class CoupledOperator(OpenMCOperator):
             self._convert_number_to_tt()
 
     def _convert_number_to_tt(self):
-        """Replace dense AtomNumber with a TT-backed composition container."""
+        """Replace dense AtomNumber with a TT-backed density container."""
         local_mats = list(self.number.materials)
         nuclides = list(self.number.nuclides)
         volume = {
@@ -304,14 +304,16 @@ class CoupledOperator(OpenMCOperator):
         mat_shape = (len(local_mats),)
         nuc_shape = (self.number.n_nuc,)
         if local_mats:
-            atom_tt = tt_svd(
-                self.number.number.reshape(mat_shape + nuc_shape, order='C'),
+            density = self.number.number.copy()
+            density *= 1.0e-24 / self.number.volume[:, None]
+            density_tt = tt_svd(
+                density.reshape(mat_shape + nuc_shape, order='C'),
                 eps=self._tt_eps)
         else:
-            atom_tt = None
-        self.number = ttd.TTAtomNumber(
+            density_tt = None
+        self.number = ttd.TTAtomDensities(
             local_mats, nuclides, volume, self.number.n_nuc_burn,
-            atom_tt, mat_shape, nuc_shape, self._tt_eps)
+            density_tt, mat_shape, nuc_shape, self._tt_eps)
 
     def _differentiate_burnable_mats(self):
         """Assign distribmats for each burnable material"""
@@ -555,17 +557,21 @@ class CoupledOperator(OpenMCOperator):
             for mat in number_i.materials:
                 nuclides = []
                 densities = []
-                if isinstance(number_i, ttd.TTAtomNumber):
-                    atoms = number_i.get_mat_full_slice(mat)
+                tt_densities = isinstance(number_i, ttd.TTAtomDensities)
+                if tt_densities:
+                    density_slice = number_i.get_mat_full_density_slice(mat)
                     set_negative_to_zero = False
                 else:
                     atoms = number_i[mat, :]
+                    normalization = 1.0e-24 / number_i.get_mat_volume(mat)
                     set_negative_to_zero = True
-                normalization = 1.0e-24 / number_i.get_mat_volume(mat)
                 for nuc in number_i.nuclides:
                     if nuc in self.nuclides_with_data:
                         i_nuc = number_i.index_nuc[nuc]
-                        val = normalization * atoms[i_nuc]
+                        if tt_densities:
+                            val = density_slice[i_nuc]
+                        else:
+                            val = normalization * atoms[i_nuc]
 
                         # If nuclide is zero, do not add to the problem.
                         if val > 0.0:
