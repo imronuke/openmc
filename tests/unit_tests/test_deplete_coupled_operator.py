@@ -3,9 +3,12 @@
 """
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
-from openmc.deplete import CoupledOperator, Chain
+from openmc.deplete import AtomNumber, CoupledOperator, Chain, ReactionRates
+from openmc.deplete.tt_depletion import (
+    TTAtomDensities, _get_tt_reaction_rates, _prepare_tt_reaction_rates)
 import openmc
 import numpy as np
 
@@ -84,6 +87,233 @@ def test_operator_init(model):
     at the end of the test, and only contains a depletion_chain node."""
 
     CoupledOperator(model, CHAIN_PATH)
+
+
+def test_tt_material_rate_helpers():
+    """TT helper path normalizes one material slice at a time."""
+
+    class FakeRateHelper:
+        nuclides = ['U235', 'U238']
+
+        def __init__(self, rates):
+            self.rates = rates
+            self.reset = False
+
+        def reset_tally_means(self):
+            self.reset = True
+
+        def get_material_rates(self, mat_index, nuc_ind, rx_ind):
+            assert nuc_ind == [0, 1]
+            assert rx_ind == [0, 1]
+            return self.rates[mat_index]
+
+    class FakeNormalizationHelper:
+        def __init__(self):
+            self.updates = []
+
+        def reset(self):
+            self.energy = 0.0
+            self.updates.clear()
+
+        def update(self, fission_rates):
+            self.updates.append(fission_rates.copy())
+            self.energy += fission_rates.sum()
+
+        def factor(self, source_rate):
+            return source_rate / self.energy
+
+    class FakeYieldHelper:
+        def unpack(self):
+            self.unpacked = True
+
+        def weighted_yields(self, local_mat_index):
+            return {'mat': local_mat_index}
+
+    class FakeReaction:
+        def __init__(self, reaction_type):
+            self.type = reaction_type
+
+    class FakeNuclide:
+        def __init__(self, name, reactions):
+            self.name = name
+            self.reactions = [FakeReaction(r) for r in reactions]
+
+    class FakeChain:
+        reactions = ['fission', 'capture']
+        nuclides = [
+            FakeNuclide('U235', ['fission', 'capture']),
+            FakeNuclide('U238', ['fission']),
+            FakeNuclide('Xe135', []),
+        ]
+
+    tally_rates = {
+        0: np.array([[4.0, 5.0], [1.0, 7.0], [0.0, 0.0]]),
+        1: np.array([[2.0, 11.0], [3.0, 13.0], [0.0, 0.0]])
+    }
+    op = object.__new__(CoupledOperator)
+    op.local_mats = ['1', '2']
+    op._mat_index_map = {'1': 0, '2': 1}
+    op.chain = FakeChain()
+    op.reaction_rates = ReactionRates(
+        op.local_mats, ['U235', 'U238', 'Xe135'], FakeChain.reactions)
+    op.number = AtomNumber(
+        op.local_mats, ['U235', 'U238', 'Xe135'],
+        {'1': 2.0, '2': 4.0}, 3)
+    op.number['1', 'U235'] = 2.0e24
+    op.number['1', 'U238'] = 6.0e24
+    op.number['2', 'U235'] = 4.0e24
+    op.number['2', 'U238'] = 4.0e24
+    op._tt_eps = 0.0
+    op._convert_number_to_tt()
+    op._rate_helper = FakeRateHelper(tally_rates)
+    op._normalization_helper = FakeNormalizationHelper()
+    op._yield_helper = FakeYieldHelper()
+
+    normalization_factor = _prepare_tt_reaction_rates(op, 24.0)
+
+    assert op._rate_helper.reset
+    assert op._yield_helper.unpacked
+    assert normalization_factor == pytest.approx(2.0)
+    assert op.chain.fission_yields == [{'mat': 0}, {'mat': 1}]
+    np.testing.assert_array_equal(
+        op._tt_reaction_rate_mask,
+        [[True, True], [True, False], [False, False]])
+    np.testing.assert_allclose(
+        op._normalization_helper.updates[0], [4.0, 3.0, 0.0])
+    np.testing.assert_allclose(
+        op._normalization_helper.updates[1], [2.0, 3.0, 0.0])
+
+    material_rates = _get_tt_reaction_rates(op, '1', normalization_factor)
+
+    assert material_rates.shape == (3, 2)
+    assert material_rates.index_nuc == op.reaction_rates.index_nuc
+    assert material_rates.index_rx == op.reaction_rates.index_rx
+    expected_rates = tally_rates[0].copy()
+    expected_rates[1, 1] = 0.0
+    np.testing.assert_allclose(
+        material_rates, expected_rates * normalization_factor / 2.0e24)
+
+
+def test_tt_operator_replaces_atom_number():
+    """CoupledOperator replaces dense AtomNumber with TTAtomDensities."""
+
+    op = object.__new__(CoupledOperator)
+    op._tt_eps = 0.0
+    op.number = AtomNumber(
+        ['1', '2'], ['U235', 'U238', 'Xe135'],
+        {'1': 2.0, '2': 4.0}, 2)
+    dense = np.array([
+        [1.0, 2.0, 3.0],
+        [4.0, 5.0, 6.0],
+    ])
+    op.number.number[:] = dense
+
+    op._convert_number_to_tt()
+
+    assert isinstance(op.number, TTAtomDensities)
+    assert op.number.tt_eps == 0.0
+    assert op.number.mat_shape == (2,)
+    assert op.number.nuc_shape == (3,)
+    assert not hasattr(op, 'tt_number')
+    expected_density = dense.copy()
+    expected_density[0] *= 1.0e-24 / 2.0
+    expected_density[1] *= 1.0e-24 / 4.0
+    np.testing.assert_allclose(
+        op.number.get_mat_full_density_slice('2'), expected_density[1])
+    np.testing.assert_allclose(op.number.get_mat_full_atom_slice('2'), dense[1])
+
+    updated_atoms = dense + 10.0
+    updated_density = updated_atoms.copy()
+    updated_density[0] *= 1.0e-24 / 2.0
+    updated_density[1] *= 1.0e-24 / 4.0
+    op.number.compress_from_density(updated_density)
+
+    np.testing.assert_allclose(
+        op.number.get_mat_full_atom_slice('1'), updated_atoms[0])
+    np.testing.assert_allclose(
+        op.number.get_mat_atom_slice('2'), updated_atoms[1, :2])
+
+
+def test_tt_operator_returns_rates_context(monkeypatch):
+    """TT operator result keeps normalization data instead of dense rates."""
+
+    op = object.__new__(CoupledOperator)
+    op._n_calls = 0
+    op._tt_depletion_used = True
+    op._update_materials = lambda: None
+    op._get_reaction_nuclides = lambda: ['U235']
+    op._rate_helper = MagicMock()
+    op._normalization_helper = MagicMock()
+    op._yield_helper = MagicMock()
+    op._print_tt_storage_reports = lambda: None
+
+    def fail_dense_path(source_rate):
+        raise AssertionError("dense reaction-rate path should not be used")
+
+    op._update_materials_and_nuclides = (
+        lambda vec: pytest.fail("dense material update should not be used"))
+    op._calculate_reaction_rates = fail_dense_path
+    monkeypatch.setattr(
+        'openmc.deplete.tt_depletion._prepare_tt_reaction_rates',
+        lambda operator, source_rate: 3.0)
+    monkeypatch.setattr(openmc.lib, "reset", lambda: None)
+    monkeypatch.setattr(openmc.lib, "run", lambda: None)
+    monkeypatch.setattr(openmc.lib, "keff", lambda: (1.0, 0.0))
+
+    result = CoupledOperator.__call__(op, [np.array([1.0])], 10.0)
+
+    assert getattr(result.rates, '_tt_reaction_rates', False) is True
+    assert result.rates.normalization_factor == 3.0
+
+
+def test_tt_operator_call_updates_from_tt_atom_densities(monkeypatch):
+    """CoupledOperator.__call__ updates transport from TTAtomDensities."""
+
+    op = object.__new__(CoupledOperator)
+    op._n_calls = 0
+    op._tt_depletion_used = True
+    op._update_materials = MagicMock()
+    op._get_reaction_nuclides = lambda: ['U235']
+    op._rate_helper = MagicMock()
+    op._normalization_helper = MagicMock()
+    op._yield_helper = MagicMock()
+    op._update_materials_and_nuclides = (
+        lambda vec: pytest.fail("dense material update should not be used"))
+    op._print_tt_storage_reports = lambda: None
+
+    monkeypatch.setattr(
+        'openmc.deplete.tt_depletion._prepare_tt_reaction_rates',
+        lambda operator, source_rate: 3.0)
+    monkeypatch.setattr(openmc.lib, "reset", lambda: None)
+    monkeypatch.setattr(openmc.lib, "run", lambda: None)
+    monkeypatch.setattr(openmc.lib, "keff", lambda: (1.0, 0.0))
+
+    CoupledOperator.__call__(op, None, 10.0)
+
+    op._update_materials.assert_called_once()
+    assert op._rate_helper.nuclides == ['U235']
+    assert op._normalization_helper.nuclides == ['U235']
+    op._yield_helper.update_tally_nuclides.assert_called_once_with(['U235'])
+
+
+def test_tt_operator_zero_source_returns_rates_context(monkeypatch):
+    """TT zero-source result avoids dense zero reaction rates."""
+
+    op = object.__new__(CoupledOperator)
+    op._tt_depletion_used = True
+    op._n_calls = 0
+    op._update_materials = lambda: None
+    op._get_reaction_nuclides = lambda: ['U235']
+    op._rate_helper = MagicMock()
+    op._normalization_helper = MagicMock()
+    op._yield_helper = MagicMock()
+    monkeypatch.setattr(openmc.lib, "reset", lambda: None)
+
+    result = CoupledOperator.__call__(op, [np.array([1.0])], 0.0)
+
+    assert getattr(result.rates, '_tt_reaction_rates', False) is True
+    assert result.rates.zero_source
+    assert result.rates.normalization_factor == 0.0
 
 
 def test_diff_volume_method_match_cell(model_with_volumes):
