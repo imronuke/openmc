@@ -968,7 +968,10 @@ class Integrator(ABC):
 
                 # Update for next step
                 if tt_depletion_used:
-                    self.operator.number.update_burnable_from_mat_slices(n_end)
+                    # In TT mode n_end is the end-of-step TTAtomDensities
+                    # object; StepResult.save above writes beginning-of-step
+                    # atom numbers before this replacement.
+                    self.operator.number = n_end
                     n = None
                 else:
                     n = n_end
@@ -983,7 +986,7 @@ class Integrator(ABC):
             if self._keff_search_control is not None and source_rate != 0.0:
                 if tt_depletion_used:
                     keff_input = list(
-                        self.operator.number.get_mat_slice(np.s_[:]))
+                        self.operator.number.get_mat_atom_slice(np.s_[:]))
                 else:
                     keff_input = n
                 keff_search_root = self._keff_search_control.run(keff_input)

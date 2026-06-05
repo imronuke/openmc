@@ -13,7 +13,7 @@ from openmc.tt import TT, _flat_to_tt_index, tt_svd
 from .reaction_rates import ReactionRates
 
 
-__all__ = ["TTAtomNumber", "TTDepletionAtoms", "TTDepletionRates"]
+__all__ = ["TTAtomDensities", "TTDepletionAtoms", "TTDepletionRates"]
 
 
 _TT_DEPLETION_ATOM_NUMBERS = "tt_depletion_atom_numbers"
@@ -43,13 +43,13 @@ class _TTReactionRates:
         self.reaction_rate_mask = reaction_rate_mask
 
 
-class TTAtomNumber:
-    """Stores local material compositions in tensor-train format.
+class TTAtomDensities:
+    """Stores local material atom densities in tensor-train format.
 
     This class mirrors the read side of :class:`openmc.deplete.AtomNumber`.
-    The represented logical tensor is ``N[material, nuclide]`` in total atoms.
-    Density accessors divide by material volume to preserve the existing
-    depletion convention.
+    The represented logical tensor is ``rho[material, nuclide]`` in
+    [atom/b-cm]. Atom-number accessors multiply by material volume to preserve
+    the existing depletion convention at Bateman and results boundaries.
 
     Parameters
     ----------
@@ -61,18 +61,18 @@ class TTAtomNumber:
         Volume of each material in [cm^3]
     n_nuc_burn : int
         Number of nuclides to be burned
-    atom_tt : openmc.TT
-        Tensor-train representation of the material composition tensor
+    density_tt : openmc.TT
+        Tensor-train representation of the material density tensor
     mat_shape : tuple of int
         TT dimensions corresponding to the material axis
     nuc_shape : tuple of int
         TT dimensions corresponding to the nuclide axis
     tt_eps : float, optional
-        TT-SVD truncation tolerance used when refreshing ``atom_tt``.
+        TT-SVD truncation tolerance used when refreshing ``density_tt``.
 
     """
 
-    def __init__(self, local_mats, nuclides, volume, n_nuc_burn, atom_tt,
+    def __init__(self, local_mats, nuclides, volume, n_nuc_burn, density_tt,
                  mat_shape, nuc_shape, tt_eps=None):
         self.index_mat = {mat: i for i, mat in enumerate(local_mats)}
         self.index_nuc = {nuc: i for i, nuc in enumerate(nuclides)}
@@ -83,7 +83,7 @@ class TTAtomNumber:
                 self.volume[self.index_mat[mat]] = val
 
         self.n_nuc_burn = n_nuc_burn
-        self.atom_tt = atom_tt
+        self.density_tt = density_tt
         self.mat_shape = tuple(int(n) for n in mat_shape)
         self.nuc_shape = tuple(int(n) for n in nuc_shape)
         self.tt_eps = tt_eps
@@ -92,42 +92,50 @@ class TTAtomNumber:
             raise ValueError("Material TT shape is incompatible with local_mats.")
         if int(np.prod(self.nuc_shape)) != len(nuclides):
             raise ValueError("Nuclide TT shape is incompatible with nuclides.")
-        if self.atom_tt is None and len(local_mats) != 0:
-            raise ValueError("Composition TT is required for local materials.")
-        if (self.atom_tt is not None and
-                self.atom_tt.shape != self.mat_shape + self.nuc_shape):
-            raise ValueError("Composition TT shape is incompatible with metadata.")
+        if self.density_tt is None and len(local_mats) != 0:
+            raise ValueError("Density TT is required for local materials.")
+        if (self.density_tt is not None and
+                self.density_tt.shape != self.mat_shape + self.nuc_shape):
+            raise ValueError("Density TT shape is incompatible with metadata.")
 
-    def compress_from_dense(self, atom):
-        """Replace the TT representation from dense total atom counts."""
-        atom = np.asarray(atom, dtype=float)
+    @staticmethod
+    def _density_to_atoms(density, volume):
+        """Convert density in [atom/b-cm] to total atoms."""
+        return np.asarray(density, dtype=float) * volume * 1.0e24
+
+    @staticmethod
+    def _atoms_to_density(atoms, volume):
+        """Convert total atoms to density in [atom/b-cm]."""
+        return np.asarray(atoms, dtype=float) / volume * 1.0e-24
+
+    def _density_to_tt(self, density):
+        density = np.asarray(density, dtype=float)
         expected_shape = (len(self.index_mat), len(self.index_nuc))
-        if atom.shape != expected_shape:
+        if density.shape != expected_shape:
             raise ValueError(
-                "Dense atom-number array shape is incompatible with metadata.")
+                "Dense atom-density array shape is incompatible with metadata.")
         if len(self.index_mat) == 0:
-            self.atom_tt = None
-            return
+            return None
 
         logical_shape = self.mat_shape + self.nuc_shape
-        self.atom_tt = tt_svd(
-            atom.reshape(logical_shape, order='C'), eps=self.tt_eps)
+        return tt_svd(density.reshape(logical_shape, order='C'),
+                      eps=self.tt_eps)
 
-    def update_burnable_from_mat_slices(self, total_density):
-        """Replace burned nuclides from dense material slices and recompress."""
-        if len(total_density) != len(self.index_mat):
-            raise ValueError(
-                "Material density list is incompatible with metadata.")
+    def compress_from_density(self, density):
+        """Replace the TT representation from dense atom densities."""
+        self.density_tt = self._density_to_tt(density)
 
-        number = self.get_mat_full_slice(np.s_[:])
-        for i, density_slice in enumerate(total_density):
-            density_slice = np.asarray(density_slice, dtype=float)
-            if density_slice.shape != (self.n_nuc_burn,):
-                raise ValueError(
-                    "Material density slice is incompatible with metadata.")
-            number[i, :self.n_nuc_burn] = density_slice
-
-        self.compress_from_dense(number)
+    def dense_to_tt_density(self, density):
+        """Return a new TTAtomDensities object from dense atom densities."""
+        density_tt = self._density_to_tt(density)
+        volume = {
+            mat: self.volume[i]
+            for mat, i in self.index_mat.items()
+        }
+        return type(self)(
+            list(self.index_mat), list(self.index_nuc), volume,
+            self.n_nuc_burn, density_tt, self.mat_shape, self.nuc_shape,
+            self.tt_eps)
 
     def _get_mat_index(self, mat):
         if isinstance(mat, Material):
@@ -140,23 +148,23 @@ class TTAtomNumber:
     def _mat_indices_from_slice(self, mat):
         return list(range(len(self.index_mat)))[mat]
 
-    def _mat_vector(self, mat_index):
-        if self.atom_tt is None:
+    def _density_vector(self, mat_index):
+        if self.density_tt is None:
             raise IndexError("Material index is out of bounds.")
         prefix = _flat_to_tt_index(mat_index, self.mat_shape)
-        atom_number = self.atom_tt._contract_slice(prefix).reshape(-1, order='C')
-        _clip_significant_negative_atoms(atom_number, self.volume[mat_index])
-        return atom_number
+        density = self.density_tt._contract_slice(prefix).reshape(-1, order='C')
+        _clip_significant_negative_densities(density)
+        return density
 
     def __getitem__(self, pos):
-        """Retrieve total atom number from the TT-backed composition."""
+        """Retrieve atom density in [atom/b-cm] from TT density storage."""
         mat, nuc = pos
         mat = self._get_mat_index(mat)
         nuc = self._get_nuc_index(nuc)
 
         if isinstance(mat, slice):
-            return self.get_mat_full_slice(mat)[:, nuc]
-        return self._mat_vector(mat)[nuc]
+            return self.get_mat_full_density_slice(mat)[:, nuc]
+        return self._density_vector(mat)[nuc]
 
     @property
     def materials(self):
@@ -180,35 +188,42 @@ class TTAtomNumber:
         mat = self._get_mat_index(mat)
         return self.volume[mat]
 
-    def get_mat_full_slice(self, mat):
-        """Return total atoms for all tracked nuclides in one material."""
+    def get_mat_full_density_slice(self, mat):
+        """Return densities in [atom/b-cm] for all tracked nuclides."""
         mat = self._get_mat_index(mat)
         if isinstance(mat, slice):
             indices = self._mat_indices_from_slice(mat)
             if not indices:
                 return np.empty((0, self.n_nuc))
-            return np.vstack([self._mat_vector(i) for i in indices])
-        return self._mat_vector(mat)
+            return np.vstack([self._density_vector(i) for i in indices])
+        return self._density_vector(mat)
 
-    def get_mat_slice(self, mat):
+    def get_mat_density_slice(self, mat):
+        """Return densities in [atom/b-cm] for all burned nuclides."""
+        return self.get_mat_full_density_slice(mat)[..., :self.n_nuc_burn]
+
+    def get_mat_full_atom_slice(self, mat):
+        """Return total atoms for all tracked nuclides in one material."""
+        mat = self._get_mat_index(mat)
+        density = self.get_mat_full_density_slice(mat)
+        volumes = self.volume[mat]
+        if isinstance(mat, slice) and np.ndim(density) == 2:
+            return self._density_to_atoms(density, volumes[:, None])
+        return self._density_to_atoms(density, volumes)
+
+    def get_mat_atom_slice(self, mat):
         """Return total atoms for all burned nuclides in one material."""
-        return self.get_mat_full_slice(mat)[..., :self.n_nuc_burn]
+        return self.get_mat_full_atom_slice(mat)[..., :self.n_nuc_burn]
 
     def get_atom_density(self, mat, nuc):
         """Return atom density of given material and nuclide in [atom/cm^3]."""
-        mat = self._get_mat_index(mat)
-        values = self[mat, nuc]
-        volumes = self.volume[mat]
-        if isinstance(mat, slice) and np.ndim(values) == 2:
-            return values / volumes[:, None]
-        return values / volumes
+        return self[mat, nuc] * 1.0e24
 
     def get_atom_densities(self, mat, units='atom/b-cm'):
         """Return atom densities for a given material."""
         mat = self._get_mat_index(mat)
-        normalization = (
-            1.0e-24 if units == 'atom/b-cm' else 1.0) / self.volume[mat]
-        full_slice = self.get_mat_full_slice(mat)
+        normalization = 1.0 if units == 'atom/b-cm' else 1.0e24
+        full_slice = self.get_mat_full_density_slice(mat)
         return {
             name: normalization * full_slice[..., nuc]
             for name, nuc in self.index_nuc.items()
@@ -228,6 +243,12 @@ def _clip_significant_negative_atoms(atom_number, volume):
     threshold = _NEGATIVE_ATOM_DENSITY_THRESHOLD * volume * 1.0e24
     if atom_number.size and np.min(atom_number) < threshold:
         atom_number[atom_number < threshold] = 0.0
+
+
+def _clip_significant_negative_densities(density):
+    """Clip atom densities below the material-density warning threshold."""
+    if density.size and np.min(density) < _NEGATIVE_ATOM_DENSITY_THRESHOLD:
+        density[density < _NEGATIVE_ATOM_DENSITY_THRESHOLD] = 0.0
 
 
 def _write_tt_hdf5(group, name, tt):
@@ -287,7 +308,7 @@ def _write_tt_atom_number_result(result, handle, index, block_index):
 def _set_tt_step_result_atom_numbers(result, operator, burn_list):
     """Populate StepResult atom numbers from TT-backed operator storage."""
     for mat_i, mat in enumerate(burn_list):
-        result[mat_i, :] = operator.number.get_mat_slice(mat)
+        result[mat_i, :] = operator.number.get_mat_full_atom_slice(mat)
 
 
 def _load_step_result_metadata(result_cls, handle, step, has_stages=False):
@@ -786,25 +807,23 @@ def _prepare_tt_reaction_rates(operator, source_rate):
     operator._rate_helper.reset_tally_means()
 
     fission_yields = []
-    number = np.zeros(rates.n_nuc)
+    density = np.zeros(rates.n_nuc)
     fission_rates = np.empty(rates.n_nuc) if fission_ind is not None else None
 
     for i, mat in enumerate(operator.local_mats):
         mat_index = operator._mat_index_map[mat]
-        mat_number = operator.number.get_mat_full_slice(mat)
-        number.fill(0.0)
+        mat_density = operator.number.get_mat_full_density_slice(mat)
+        density.fill(0.0)
         for nuc, i_nuc_results in zip(rxn_nuclides, nuc_ind):
-            number[i_nuc_results] = mat_number[operator.number.index_nuc[nuc]]
+            density[i_nuc_results] = mat_density[operator.number.index_nuc[nuc]]
 
         tally_rates = operator._rate_helper.get_material_rates(
             mat_index, nuc_ind, rx_ind)
         fission_yields.append(operator._yield_helper.weighted_yields(i))
 
         if fission_ind is not None:
-            volume_b_cm = 1e24 * operator.number.get_mat_volume(mat)
-            np.multiply(number, 1.0 / volume_b_cm, out=fission_rates)
             np.multiply(
-                tally_rates[:, fission_ind], fission_rates,
+                tally_rates[:, fission_ind], density,
                 out=fission_rates)
             np.multiply(
                 fission_rates, reaction_rate_mask[:, fission_ind],
@@ -861,7 +880,6 @@ def timed_tt_deplete(
             "equal to the number of compositions {}".format(
                 len(fission_yields), len(operator.local_mats)))
 
-    results = []
     zero_rates = None
     reaction_rate_mask = getattr(rates, 'reaction_rate_mask', None)
     if reaction_rate_mask is not None:
@@ -871,9 +889,10 @@ def timed_tt_deplete(
         zero_rates.fill(0.0)
 
     number = operator.number
+    density_end = number.get_mat_full_density_slice(np.s_[:])
 
     for mat, yields in zip(operator.local_mats, fission_yields):
-        n_mat = number.get_mat_slice(mat)
+        n_mat = number.get_mat_atom_slice(mat)
         if zero_rates is None:
             mat_rates = _get_tt_reaction_rates(
                 operator, mat, rates.normalization_factor)
@@ -882,6 +901,8 @@ def timed_tt_deplete(
         matrix = chain.form_matrix(mat_rates, yields)
         n_result = solver(matrix, n_mat, dt, substeps)
         n_result.clip(min=0.0, out=n_result)
-        results.append(n_result)
+        mat_index = number._get_mat_index(mat)
+        density_end[mat_index, :number.n_nuc_burn] = number._atoms_to_density(
+            n_result, number.get_mat_volume(mat))
 
-    return time.time() - start, results
+    return time.time() - start, number.dense_to_tt_density(density_end)
