@@ -57,6 +57,14 @@ The current version of the depletion results file format is 1.3.
                values. Currently ``tally_mean``.
              - **normalization_mode** (*char[]*) -- Depletion normalization mode
                used with the stored tensor-train tally values.
+             - **tt_eps** (*double*) -- Tensor-train truncation tolerance used
+               for depletion reaction-rate tally accumulation.
+
+:Datasets: - **reaction_rate_mask** (*bool[][]*) -- Mask indicating which
+             nuclide/reaction pairs are present in the depletion chain. This
+             array has shape (number of reaction-rate nuclides, number of
+             reactions). The mask is solver metadata; stored tensor-train tally
+             means are not masked.
 
 **/tt_depletion_reaction_rates/steps/<step>/**
 
