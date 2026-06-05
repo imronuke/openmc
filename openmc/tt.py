@@ -6,6 +6,89 @@ import h5py
 import numpy as np
 
 
+def _prime_factors(n):
+    factors = []
+    if n <= 1:
+        return factors
+    while n % 2 == 0:
+        factors.append(2)
+        n //= 2
+    p = 3
+    while p * p <= n:
+        while n % p == 0:
+            factors.append(p)
+            n //= p
+        p += 2
+    if n > 1:
+        factors.append(n)
+    return factors
+
+
+def _balanced_groups_no_empty(n, order):
+    if order <= 0:
+        raise ValueError("auto_tt_shape: order must be positive")
+    if n <= 1:
+        return (1,) * order
+
+    primes = sorted(_prime_factors(n), reverse=True)
+    groups = [1] * order
+    logs = [0.0] * order
+    for p in primes:
+        j = min(range(order), key=lambda i: logs[i])
+        groups[j] *= p
+        logs[j] += np.log(float(p))
+    return tuple(sorted(groups))
+
+
+def _score_dims_list(dims, site_min, site_cap):
+    penalty = 0.0
+    logs = []
+    for n in dims:
+        if n <= 0:
+            raise ValueError("auto_tt_shape: dimensions must be positive")
+        if n == 1:
+            penalty += 2.0
+        else:
+            if n < site_min:
+                penalty += (site_min - n) / site_min
+            if n > site_cap:
+                penalty += (n - site_cap) / site_cap
+            logs.append(np.log(float(n)))
+
+    if len(logs) >= 2:
+        mu = sum(logs) / len(logs)
+        var = sum((x - mu) * (x - mu) for x in logs)
+        penalty += var / len(logs)
+    return penalty
+
+
+def _auto_tt_shape(
+        n, site_min=9, site_cap=243, prefer_order=3, min_order=1,
+        max_order=5):
+    """Return a factorized TT shape matching OpenMC's C++ auto_tt_shape."""
+    n = int(n)
+    if n <= 0:
+        raise ValueError("auto_tt_shape: n must be positive")
+    if (site_min <= 1 or site_cap < site_min or prefer_order <= 0 or
+            min_order <= 0 or max_order < min_order):
+        raise ValueError("auto_tt_shape: invalid parameters")
+    if n <= 1:
+        return (1,)
+    if n <= site_cap:
+        return (n,)
+
+    best_score = np.inf
+    best_dims = ()
+    for d in range(min_order, max_order + 1):
+        dims = _balanced_groups_no_empty(n, d)
+        score = _score_dims_list(dims, site_min, site_cap)
+        score += 0.1 * abs(d - prefer_order)
+        if score < best_score:
+            best_score = score
+            best_dims = dims
+    return best_dims
+
+
 def _flat_to_tt_index(flat_index, tt_shape):
     index = []
     for n in reversed(tt_shape):
