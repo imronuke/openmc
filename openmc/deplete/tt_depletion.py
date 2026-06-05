@@ -202,18 +202,14 @@ class TTAtomDensities:
         """Return densities in [atom/b-cm] for all burned nuclides."""
         return self.get_mat_full_density_slice(mat)[..., :self.n_nuc_burn]
 
-    def get_mat_full_atom_slice(self, mat):
-        """Return total atoms for all tracked nuclides in one material."""
+    def get_mat_atom_slice(self, mat):
+        """Return total atoms for all burned nuclides in one material."""
         mat = self._get_mat_index(mat)
-        density = self.get_mat_full_density_slice(mat)
+        density = self.get_mat_density_slice(mat)
         volumes = self.volume[mat]
         if isinstance(mat, slice) and np.ndim(density) == 2:
             return self._density_to_atoms(density, volumes[:, None])
         return self._density_to_atoms(density, volumes)
-
-    def get_mat_atom_slice(self, mat):
-        """Return total atoms for all burned nuclides in one material."""
-        return self.get_mat_full_atom_slice(mat)[..., :self.n_nuc_burn]
 
     def get_atom_density(self, mat, nuc):
         """Return atom density of given material and nuclide in [atom/cm^3]."""
@@ -308,7 +304,7 @@ def _write_tt_atom_number_result(result, handle, index, block_index):
 def _set_tt_step_result_atom_numbers(result, operator, burn_list):
     """Populate StepResult atom numbers from TT-backed operator storage."""
     for mat_i, mat in enumerate(burn_list):
-        result[mat_i, :] = operator.number.get_mat_full_atom_slice(mat)
+        result[mat_i, :] = operator.number.get_mat_atom_slice(mat)
 
 
 def _load_step_result_metadata(result_cls, handle, step, has_stages=False):
