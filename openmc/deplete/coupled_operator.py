@@ -116,6 +116,12 @@ def _check_tt_depletion_supported(
     if model.settings.photon_transport is True:
         raise ValueError(
             "Tensor-train depletion is only supported with neutron transport.")
+    if model.tallies is not None:
+        for tally in model.tallies:
+            if tally.derivative is not None:
+                raise ValueError(
+                    "Tensor-train depletion is not supported with tally "
+                    "derivatives.")
     if comm.size != 1:
         raise ValueError(
             "Tensor-train depletion is not supported with multiple MPI ranks.")
@@ -579,25 +585,20 @@ class CoupledOperator(OpenMCOperator):
             number_i = comm.bcast(self.number, root=rank)
             tt_densities = isinstance(number_i, ttd.TTAtomDensities)
             if tt_densities:
+                # TT-backed materials keep atom densities in C-side TT storage
+                # and release their dense Material atom-density arrays.
                 openmc.lib.tt_density.set_atom_density_tt(number_i)
+                continue
 
             for mat in number_i.materials:
                 nuclides = []
                 densities = []
-                if tt_densities:
-                    density_slice = number_i.get_mat_full_density_slice(mat)
-                    set_negative_to_zero = False
-                else:
-                    atoms = number_i[mat, :]
-                    normalization = 1.0e-24 / number_i.get_mat_volume(mat)
-                    set_negative_to_zero = True
+                atoms = number_i[mat, :]
+                normalization = 1.0e-24 / number_i.get_mat_volume(mat)
                 for nuc in number_i.nuclides:
                     if nuc in self.nuclides_with_data:
                         i_nuc = number_i.index_nuc[nuc]
-                        if tt_densities:
-                            val = density_slice[i_nuc]
-                        else:
-                            val = normalization * atoms[i_nuc]
+                        val = normalization * atoms[i_nuc]
 
                         # If nuclide is zero, do not add to the problem.
                         if val > 0.0:
@@ -620,8 +621,7 @@ class CoupledOperator(OpenMCOperator):
 
                                       ' atom/b-cm)')
 
-                                if set_negative_to_zero:
-                                    number_i[mat, nuc] = 0.0
+                                number_i[mat, nuc] = 0.0
 
                 # Update densities on C API side
                 mat_internal = openmc.lib.materials[int(mat)]

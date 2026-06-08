@@ -150,6 +150,7 @@ void Particle::from_source(const SourceSite* src)
   surface() = SURFACE_NONE;
   cell_born() = C_NONE;
   material() = C_NONE;
+  invalidate_atom_density_tt_cache();
   n_collision() = 0;
   fission() = false;
   zero_flux_derivs();

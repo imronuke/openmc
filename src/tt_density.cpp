@@ -12,7 +12,9 @@
 #include "openmc/capi.h"
 #include "openmc/constants.h"
 #include "openmc/error.h"
+#include "openmc/material.h"
 #include "openmc/message_passing.h"
+#include "openmc/particle.h"
 #include "openmc/settings.h"
 
 namespace openmc {
@@ -95,43 +97,85 @@ void validate_tt(const TT& tt)
   }
 }
 
-// Build a lookup from a material or nuclide index to its flat TT-axis
+// Build a direct lookup from a material or nuclide index to its flat TT-axis
 // position.
 template<typename T>
-std::unordered_map<T, int> build_position_map(
-  const vector<T>& values, const char* name)
+vector<int> build_position_lookup(
+  const vector<T>& values, const char* name, bool skip_c_none)
 {
-  std::unordered_map<T, int> map;
-  map.reserve(values.size());
+  vector<int> lookup;
   const int n_values = static_cast<int>(values.size());
   for (int i = 0; i < n_values; ++i) {
-    auto inserted = map.emplace(values[i], i);
-    if (!inserted.second) {
+    auto value = values[i];
+    if (skip_c_none && value == C_NONE)
+      continue;
+    if (value < 0) {
+      throw std::invalid_argument(std::string {name} +
+                                  " must be non-negative.");
+    }
+
+    const auto position = static_cast<size_t>(value);
+    if (position >= lookup.size())
+      lookup.resize(position + 1, C_NONE);
+
+    if (lookup[position] != C_NONE) {
       throw std::invalid_argument(std::string {"Duplicate "} + name +
                                   " in tensor-train atom density metadata.");
     }
+    lookup[position] = i;
   }
-  return map;
+  return lookup;
 }
 
-// Build a lookup for nuclides with loaded transport data. Nuclides that are
-// present only in depletion metadata use C_NONE and are skipped.
-std::unordered_map<int, int> build_nuclide_position_map(
-  const vector<int>& values)
+int lookup_position(const vector<int>& lookup, int index)
 {
-  std::unordered_map<int, int> map;
-  map.reserve(values.size());
-  const int n_values = static_cast<int>(values.size());
-  for (int i = 0; i < n_values; ++i) {
-    if (values[i] == C_NONE)
+  if (index < 0 || static_cast<size_t>(index) >= lookup.size())
+    return C_NONE;
+  return lookup[index];
+}
+
+// Warn once for each TT-backed material that has S(a,b) treatment. Stage 2 of
+// TT depletion uses unbound microscopic neutron cross sections for TT-backed
+// materials.
+void warn_ignored_sab_material(int32_t material_index,
+  std::unordered_set<int32_t>& warned_sab_materials)
+{
+  if (material_index < 0 ||
+      static_cast<size_t>(material_index) >= model::materials.size())
+    return;
+
+  const auto& material = model::materials[material_index];
+  if (material && !material->thermal_tables_.empty() &&
+      warned_sab_materials.insert(material_index).second) {
+    warning("Tensor-train depletion currently ignores S(a,b) treatment for "
+            "TT-backed material ID=" +
+            std::to_string(material->id()) +
+            ". Use dense depletion for this material if bound thermal "
+            "scattering is required.");
+  }
+}
+
+void warn_ignored_sab_materials(const vector<int32_t>& material_indices,
+  std::unordered_set<int32_t>& warned_sab_materials)
+{
+  for (auto material_index : material_indices) {
+    warn_ignored_sab_material(material_index, warned_sab_materials);
+  }
+}
+
+// Release dense material atom-density storage once TT storage is authoritative.
+void release_dense_atom_densities(const vector<int32_t>& material_indices)
+{
+  for (auto material_index : material_indices) {
+    if (material_index < 0 ||
+        static_cast<size_t>(material_index) >= model::materials.size())
       continue;
-    auto inserted = map.emplace(values[i], i);
-    if (!inserted.second) {
-      throw std::invalid_argument(
-        "Duplicate nuclide index in tensor-train atom density metadata.");
+
+    auto& material = model::materials[material_index];
+    if (material) {
+      material->atom_density_ = tensor::Tensor<double> {};
     }
   }
-  return map;
 }
 
 // Contract the material-axis cores at one material index, leaving the TT state
@@ -208,14 +252,15 @@ AtomDensityTT atom_density_tt;
 void AtomDensityTT::clear()
 {
   enabled_ = false;
-  material_indices_.clear();
-  nuclide_names_.clear();
-  nuclide_indices_.clear();
-  mat_shape_.clear();
-  nuc_shape_.clear();
+  material_indices_ = {};
+  nuclide_names_ = {};
+  nuclide_indices_ = {};
+  mat_shape_ = {};
+  nuc_shape_ = {};
   density_tt_ = TT {};
-  material_pos_.clear();
-  nuclide_pos_.clear();
+  material_pos_ = {};
+  nuclide_pos_ = {};
+  warned_sab_materials_ = {};
 }
 
 // Store a complete TT density tensor and its material/nuclide metadata after
@@ -267,8 +312,9 @@ void AtomDensityTT::set_data(const vector<int32_t>& material_indices,
   }
 
   auto material_pos =
-    build_position_map<int32_t>(material_indices, "material index");
-  auto nuclide_pos = build_nuclide_position_map(nuclide_indices);
+    build_position_lookup<int32_t>(material_indices, "material index", false);
+  auto nuclide_pos =
+    build_position_lookup<int>(nuclide_indices, "nuclide index", true);
 
   material_indices_ = material_indices;
   nuclide_names_ = nuclide_names;
@@ -278,6 +324,8 @@ void AtomDensityTT::set_data(const vector<int32_t>& material_indices,
   density_tt_ = std::move(density_tt);
   material_pos_ = std::move(material_pos);
   nuclide_pos_ = std::move(nuclide_pos);
+  warn_ignored_sab_materials(material_indices_, warned_sab_materials_);
+  release_dense_atom_densities(material_indices_);
   enabled_ = true;
 }
 
@@ -303,29 +351,42 @@ void AtomDensityTT::validate_supported_mode() const
 // Return the flat TT material-axis position for a C++ material index.
 int AtomDensityTT::material_position(int32_t material_index) const
 {
-  auto it = material_pos_.find(material_index);
-  if (it == material_pos_.end()) {
+  int position = lookup_position(material_pos_, material_index);
+  if (position == C_NONE) {
     throw std::out_of_range(
       "Material index is not present in tensor-train atom density metadata.");
   }
-  return it->second;
+  return position;
 }
 
 // Return whether a C++ material index is backed by the TT density storage.
 bool AtomDensityTT::contains_material(int32_t material_index) const
 {
-  return material_pos_.find(material_index) != material_pos_.end();
+  return lookup_position(material_pos_, material_index) != C_NONE;
+}
+
+// Return whether the particle's current material is backed by TT density
+// storage.
+bool AtomDensityTT::contains_material(const Particle& p) const
+{
+  return contains_material(p.material());
 }
 
 // Return the flat TT nuclide-axis position for a C++ nuclide index.
 int AtomDensityTT::nuclide_position(int nuclide_index) const
 {
-  auto it = nuclide_pos_.find(nuclide_index);
-  if (it == nuclide_pos_.end()) {
+  int position = lookup_position(nuclide_pos_, nuclide_index);
+  if (position == C_NONE) {
     throw std::out_of_range(
       "Nuclide index is not present in tensor-train atom density metadata.");
   }
-  return it->second;
+  return position;
+}
+
+// Return whether a C++ nuclide index is backed by the TT density storage.
+bool AtomDensityTT::contains_nuclide(int nuclide_index) const
+{
+  return lookup_position(nuclide_pos_, nuclide_index) != C_NONE;
 }
 
 // Reconstruct the dense atom-density row for one material without expanding
@@ -354,6 +415,54 @@ void AtomDensityTT::reconstruct_material(
         value = 0.0;
     }
   }
+}
+
+// Reconstruct or reuse the dense TT atom-density row for the material where a
+// particle is currently located.
+const vector<double>& AtomDensityTT::material_densities(Particle& p) const
+{
+  if (!enabled_) {
+    throw std::runtime_error(
+      "Tensor-train atom density storage has not been enabled.");
+  }
+
+  const int material_index = p.material();
+  if (!contains_material(material_index)) {
+    throw std::out_of_range(
+      "Particle material is not present in tensor-train atom density metadata.");
+  }
+
+  if (p.atom_density_tt_material_ != material_index) {
+    reconstruct_material(material_index, p.atom_density_tt_);
+    p.atom_density_tt_material_ = material_index;
+  }
+
+  return p.atom_density_tt_;
+}
+
+// Return the TT-backed atom density for the particle material and requested
+// nuclide. A false return indicates that the current material or nuclide is not
+// represented by TT storage.
+bool AtomDensityTT::atom_density(
+  Particle& p, int nuclide_index, double& density, double rho_multiplier) const
+{
+  density = 0.0;
+  if (!enabled_ || !contains_material(p.material()))
+    return false;
+
+  int position = lookup_position(nuclide_pos_, nuclide_index);
+  if (position == C_NONE)
+    return false;
+
+  const auto& row = material_densities(p);
+  const auto density_position = static_cast<size_t>(position);
+  if (density_position >= row.size()) {
+    throw std::runtime_error(
+      "Tensor-train atom density row is incompatible with nuclide metadata.");
+  }
+
+  density = row[density_position] * rho_multiplier;
+  return true;
 }
 
 namespace {

@@ -20,6 +20,7 @@
 #include "openmc/tallies/filter_cell.h"
 #include "openmc/tallies/filter_delayedgroup.h"
 #include "openmc/tallies/filter_energy.h"
+#include "openmc/tt_density.h"
 
 #include <numeric>
 #include <string>
@@ -144,6 +145,67 @@ void FilterBinIter::compute_index_weight()
 // Non-member functions
 //==============================================================================
 
+namespace {
+
+bool use_tt_tally_densities(Particle& p)
+{
+  return settings::run_CE && p.type().is_neutron() &&
+         model::atom_density_tt.contains_material(p);
+}
+
+double tally_atom_density(
+  Particle& p, int i_nuclide, double rho_multiplier)
+{
+  if (p.material() == MATERIAL_VOID)
+    return 0.0;
+
+  if (use_tt_tally_densities(p)) {
+    double atom_density;
+    if (model::atom_density_tt.atom_density(
+          p, i_nuclide, atom_density, rho_multiplier))
+      return atom_density;
+    return 0.0;
+  }
+
+  const auto& mat = model::materials[p.material()];
+  auto i = mat->mat_nuclide_index_[i_nuclide];
+  return i != C_NONE ? mat->atom_density(i, rho_multiplier) : 0.0;
+}
+
+template<typename F>
+void for_each_material_nuclide_density(
+  Particle& p, double rho_multiplier, F&& f)
+{
+  if (p.material() == MATERIAL_VOID)
+    return;
+
+  if (use_tt_tally_densities(p)) {
+    const auto& atom_density = model::atom_density_tt.material_densities(p);
+    const auto& nuclide = model::atom_density_tt.nuclide_indices();
+
+    for (int i = 0; i < nuclide.size(); ++i) {
+      int i_nuclide = nuclide[i];
+      if (i_nuclide == C_NONE)
+        continue;
+
+      const double density = atom_density[i] * rho_multiplier;
+      if (density == 0.0)
+        continue;
+
+      f(i_nuclide, density);
+    }
+  } else {
+    const Material& material {*model::materials[p.material()]};
+    for (auto i = 0; i < material.nuclide_.size(); ++i) {
+      auto i_nuclide = material.nuclide_[i];
+      auto atom_density = material.atom_density(i, rho_multiplier);
+      f(i_nuclide, atom_density);
+    }
+  }
+}
+
+} // namespace
+
 //! Helper function used to increment tallies with a delayed group filter.
 
 void score_fission_delayed_dg(int i_tally, int d_bin, double score,
@@ -198,7 +260,7 @@ double get_nuc_fission_q(const Nuclide& nuc, const Particle& p, int score_bin)
 //! Pulled out to support both the fission_q scores and energy deposition
 //! score
 
-double score_fission_q(const Particle& p, int score_bin, const Tally& tally,
+double score_fission_q(Particle& p, int score_bin, const Tally& tally,
   double flux, int i_nuclide, double atom_density)
 {
   if (tally.estimator_ == TallyEstimator::ANALOG) {
@@ -231,15 +293,13 @@ double score_fission_q(const Particle& p, int score_bin, const Tally& tally,
       return get_nuc_fission_q(nuc, p, score_bin) * atom_density * flux *
              p.neutron_xs(i_nuclide).fission;
     } else if (p.material() != MATERIAL_VOID) {
-      const Material& material {*model::materials[p.material()]};
       double score {0.0};
-      for (auto i = 0; i < material.nuclide_.size(); ++i) {
-        auto j_nuclide = material.nuclide_[i];
-        auto atom_density = material.atom_density(i, p.density_mult());
-        const Nuclide& nuc {*data::nuclides[j_nuclide]};
-        score += get_nuc_fission_q(nuc, p, score_bin) * atom_density *
-                 p.neutron_xs(j_nuclide).fission;
-      }
+      for_each_material_nuclide_density(
+        p, p.density_mult(), [&](int j_nuclide, double atom_density) {
+          const Nuclide& nuc {*data::nuclides[j_nuclide]};
+          score += get_nuc_fission_q(nuc, p, score_bin) * atom_density *
+                   p.neutron_xs(j_nuclide).fission;
+        });
       return score * flux;
     }
   }
@@ -288,7 +348,7 @@ double get_nuclide_neutron_heating(
 
 //! Helper function to obtain neutron heating [eV]
 
-double score_neutron_heating(const Particle& p, const Tally& tally, double flux,
+double score_neutron_heating(Particle& p, const Tally& tally, double flux,
   int rxn_bin, int i_nuclide, double atom_density)
 {
   // Get heating macroscopic "cross section"
@@ -304,14 +364,12 @@ double score_neutron_heating(const Particle& p, const Tally& tally, double flux,
   } else {
     if (p.material() != MATERIAL_VOID) {
       heating_xs = 0.0;
-      const Material& material {*model::materials[p.material()]};
-      for (auto i = 0; i < material.nuclide_.size(); ++i) {
-        int j_nuclide = material.nuclide_[i];
-        double atom_density {material.atom_density_(i)};
-        const Nuclide& nuc {*data::nuclides[j_nuclide]};
-        heating_xs += atom_density *
-                      get_nuclide_neutron_heating(p, nuc, rxn_bin, j_nuclide);
-      }
+      for_each_material_nuclide_density(
+        p, 1.0, [&](int j_nuclide, double atom_density) {
+          const Nuclide& nuc {*data::nuclides[j_nuclide]};
+          heating_xs += atom_density * get_nuclide_neutron_heating(
+                                          p, nuc, rxn_bin, j_nuclide);
+        });
       if (tally.estimator_ == TallyEstimator::ANALOG) {
         heating_xs /= p.macro_xs().total;
       }
@@ -343,7 +401,7 @@ double get_reaction_q_value(const Particle& p)
 
 //! Helper function to obtain particle heating [eV]
 
-double score_particle_heating(const Particle& p, const Tally& tally,
+double score_particle_heating(Particle& p, const Tally& tally,
   double flux, int rxn_bin, int i_nuclide, double atom_density)
 {
   if (p.type().is_neutron())
@@ -692,17 +750,13 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
       } else {
         score = 0.;
         // Add up contributions from each nuclide in the material.
-        if (p.material() != MATERIAL_VOID) {
-          const Material& material {*model::materials[p.material()]};
-          for (auto i = 0; i < material.nuclide_.size(); ++i) {
-            auto j_nuclide = material.nuclide_[i];
-            auto atom_density = material.atom_density(i, p.density_mult());
+        for_each_material_nuclide_density(
+          p, p.density_mult(), [&](int j_nuclide, double atom_density) {
             score += p.neutron_xs(j_nuclide).fission *
                      data::nuclides[j_nuclide]->nu(
                        E, ReactionProduct::EmissionMode::prompt) *
                      atom_density * flux;
-          }
-        }
+          });
       }
       break;
 
@@ -739,11 +793,8 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
           auto i_dg_filt = tally.filters()[tally.delayedgroup_filter_];
           const DelayedGroupFilter& filt {*dynamic_cast<DelayedGroupFilter*>(
             model::tally_filters[i_dg_filt].get())};
-          if (p.material() != MATERIAL_VOID) {
-            const Material& material {*model::materials[p.material()]};
-            for (auto i = 0; i < material.nuclide_.size(); ++i) {
-              auto j_nuclide = material.nuclide_[i];
-              auto atom_density = material.atom_density(i, p.density_mult());
+          for_each_material_nuclide_density(
+            p, p.density_mult(), [&](int j_nuclide, double atom_density) {
               // Tally each delayed group bin individually
               for (auto d_bin = 0; d_bin < filt.n_bins(); ++d_bin) {
                 auto d = filt.groups()[d_bin];
@@ -754,22 +805,17 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
                 score_fission_delayed_dg(
                   i_tally, d_bin, score, score_index, p.filter_matches());
               }
-            }
-          }
+            });
           continue;
         } else {
           score = 0.;
-          if (p.material() != MATERIAL_VOID) {
-            const Material& material {*model::materials[p.material()]};
-            for (auto i = 0; i < material.nuclide_.size(); ++i) {
-              auto j_nuclide = material.nuclide_[i];
-              auto atom_density = material.atom_density(i, p.density_mult());
+          for_each_material_nuclide_density(
+            p, p.density_mult(), [&](int j_nuclide, double atom_density) {
               score += p.neutron_xs(j_nuclide).fission *
                        data::nuclides[j_nuclide]->nu(
                          E, ReactionProduct::EmissionMode::delayed) *
                        atom_density * flux;
-            }
-          }
+            });
         }
       }
       break;
@@ -820,11 +866,8 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
           auto i_dg_filt = tally.filters()[tally.delayedgroup_filter_];
           const DelayedGroupFilter& filt {*dynamic_cast<DelayedGroupFilter*>(
             model::tally_filters[i_dg_filt].get())};
-          if (p.material() != MATERIAL_VOID) {
-            const Material& material {*model::materials[p.material()]};
-            for (auto i = 0; i < material.nuclide_.size(); ++i) {
-              auto j_nuclide = material.nuclide_[i];
-              auto atom_density = material.atom_density(i, p.density_mult());
+          for_each_material_nuclide_density(
+            p, p.density_mult(), [&](int j_nuclide, double atom_density) {
               const auto& nuc {*data::nuclides[j_nuclide]};
               if (nuc.fissionable_) {
                 const auto& rxn {*nuc.fission_rx_[0]};
@@ -840,16 +883,12 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
                     i_tally, d_bin, score, score_index, p.filter_matches());
                 }
               }
-            }
-          }
+            });
           continue;
         } else {
           score = 0.;
-          if (p.material() != MATERIAL_VOID) {
-            const Material& material {*model::materials[p.material()]};
-            for (auto i = 0; i < material.nuclide_.size(); ++i) {
-              auto j_nuclide = material.nuclide_[i];
-              auto atom_density = material.atom_density(i, p.density_mult());
+          for_each_material_nuclide_density(
+            p, p.density_mult(), [&](int j_nuclide, double atom_density) {
               const auto& nuc {*data::nuclides[j_nuclide]};
               if (nuc.fissionable_) {
                 const auto& rxn {*nuc.fission_rx_[0]};
@@ -870,8 +909,7 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
                            atom_density * flux * rate;
                 }
               }
-            }
-          }
+            });
         }
       }
       break;
@@ -889,18 +927,16 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
           score = rxn.q_value_ * p.neutron_xs(i_nuclide).fission *
                   atom_density * flux;
         }
-      } else if (p.material() != MATERIAL_VOID) {
-        const Material& material {*model::materials[p.material()]};
-        for (auto i = 0; i < material.nuclide_.size(); ++i) {
-          auto j_nuclide = material.nuclide_[i];
-          auto atom_density = material.atom_density(i, p.density_mult());
-          const auto& nuc {*data::nuclides[j_nuclide]};
-          if (nuc.fissionable_) {
-            const auto& rxn {*nuc.fission_rx_[0]};
-            score += rxn.q_value_ * p.neutron_xs(j_nuclide).fission *
-                     atom_density * flux;
-          }
-        }
+      } else {
+        for_each_material_nuclide_density(
+          p, p.density_mult(), [&](int j_nuclide, double atom_density) {
+            const auto& nuc {*data::nuclides[j_nuclide]};
+            if (nuc.fissionable_) {
+              const auto& rxn {*nuc.fission_rx_[0]};
+              score += rxn.q_value_ * p.neutron_xs(j_nuclide).fission *
+                       atom_density * flux;
+            }
+          });
       }
       break;
 
@@ -919,16 +955,12 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
         score = p.neutron_xs(i_nuclide).elastic * atom_density * flux;
       } else {
         score = 0.;
-        if (p.material() != MATERIAL_VOID) {
-          const Material& material {*model::materials[p.material()]};
-          for (auto i = 0; i < material.nuclide_.size(); ++i) {
-            auto j_nuclide = material.nuclide_[i];
-            auto atom_density = material.atom_density(i, p.density_mult());
+        for_each_material_nuclide_density(
+          p, p.density_mult(), [&](int j_nuclide, double atom_density) {
             if (p.neutron_xs(j_nuclide).elastic == CACHE_INVALID)
               data::nuclides[j_nuclide]->calculate_elastic_xs(p);
             score += p.neutron_xs(j_nuclide).elastic * atom_density * flux;
-          }
-        }
+          });
       }
       break;
 
@@ -1028,14 +1060,10 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
         score = p.neutron_xs(i_nuclide).reaction[m] * atom_density * flux;
       } else {
         score = 0.;
-        if (p.material() != MATERIAL_VOID) {
-          const Material& material {*model::materials[p.material()]};
-          for (auto i = 0; i < material.nuclide_.size(); ++i) {
-            auto j_nuclide = material.nuclide_[i];
-            auto atom_density = material.atom_density(i, p.density_mult());
+        for_each_material_nuclide_density(
+          p, p.density_mult(), [&](int j_nuclide, double atom_density) {
             score += p.neutron_xs(j_nuclide).reaction[m] * atom_density * flux;
-          }
-        }
+          });
       }
       break;
 
@@ -1082,14 +1110,12 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
       score = 0.;
       if (i_nuclide >= 0) {
         score = get_nuclide_xs(p, i_nuclide, score_bin) * atom_density * flux;
-      } else if (p.material() != MATERIAL_VOID) {
-        const Material& material {*model::materials[p.material()]};
-        for (auto i = 0; i < material.nuclide_.size(); ++i) {
-          auto j_nuclide = material.nuclide_[i];
-          auto atom_density = material.atom_density(i, p.density_mult());
-          score +=
-            get_nuclide_xs(p, j_nuclide, score_bin) * atom_density * flux;
-        }
+      } else {
+        for_each_material_nuclide_density(
+          p, p.density_mult(), [&](int j_nuclide, double atom_density) {
+            score +=
+              get_nuclide_xs(p, j_nuclide, score_bin) * atom_density * flux;
+          });
       }
     }
 
@@ -2432,12 +2458,8 @@ void score_tracklength_tally_general(
 
         double atom_density = 0.;
         if (i_nuclide >= 0) {
-          if (p.material() != MATERIAL_VOID) {
-            const auto& mat = model::materials[p.material()];
-            auto j = mat->mat_nuclide_index_[i_nuclide];
-            if (j != C_NONE)
-              atom_density = mat->atom_density(j, p.density_mult());
-          }
+          atom_density =
+            tally_atom_density(p, i_nuclide, p.density_mult());
           if (atom_density > 0) {
             if (!tally.multiply_density())
               atom_density = 1.0;
@@ -2562,12 +2584,8 @@ void score_collision_tally(Particle& p)
 
         double atom_density = 0.;
         if (i_nuclide >= 0) {
-          if (p.material() != MATERIAL_VOID) {
-            const auto& mat = model::materials[p.material()];
-            auto j = mat->mat_nuclide_index_[i_nuclide];
-            if (j != C_NONE)
-              atom_density = mat->atom_density(j, p.density_mult());
-          }
+          atom_density =
+            tally_atom_density(p, i_nuclide, p.density_mult());
           if (atom_density > 0) {
             if (!tally.multiply_density())
               atom_density = 1.0;

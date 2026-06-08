@@ -26,6 +26,7 @@
 #include "openmc/string_utils.h"
 #include "openmc/tallies/tally.h"
 #include "openmc/thermal.h"
+#include "openmc/tt_density.h"
 #include "openmc/weight_windows.h"
 
 #include <fmt/core.h>
@@ -507,6 +508,30 @@ int sample_nuclide(Particle& p)
   // Sample cumulative distribution function
   double cutoff = prn(p.current_seed()) * p.macro_xs().total;
 
+  if (model::atom_density_tt.contains_material(p)) {
+    const auto& atom_density = model::atom_density_tt.material_densities(p);
+    const auto& nuclide = model::atom_density_tt.nuclide_indices();
+    const double density_mult = p.density_mult();
+
+    double prob = 0.0;
+    for (int i = 0; i < nuclide.size(); ++i) {
+      int i_nuclide = nuclide[i];
+      if (i_nuclide == C_NONE)
+        continue;
+
+      const double density = atom_density[i] * density_mult;
+      if (density == 0.0)
+        continue;
+
+      prob += density * p.neutron_xs(i_nuclide).total;
+      if (prob >= cutoff)
+        return i_nuclide;
+    }
+
+    p.write_restart();
+    throw std::runtime_error {"Did not sample any nuclide during collision."};
+  }
+
   // Get pointers to nuclide/density arrays
   const auto& mat {model::materials[p.material()]};
   int n = mat->nuclide_.size();
@@ -754,7 +779,7 @@ void scatter(Particle& p, int i_nuclide)
   const auto& mat {model::materials[p.material()]};
   if (!mat->p0_.empty()) {
     int i_nuc_mat = mat->mat_nuclide_index_[i_nuclide];
-    if (mat->p0_[i_nuc_mat]) {
+    if (i_nuc_mat != C_NONE && mat->p0_[i_nuc_mat]) {
       // Sample isotropic-in-lab outgoing direction
       p.u() = isotropic_direction(p.current_seed());
       p.mu() = u_old.dot(p.u());

@@ -122,6 +122,20 @@ def test_tt_depletion_rejects_photon_transport():
             tt_model, 1.0e-8, "direct", "fission-q", "constant")
 
 
+def test_tt_depletion_rejects_derivative_tally():
+    from openmc.deplete.coupled_operator import _check_tt_depletion_supported
+
+    tally = openmc.Tally()
+    tally.derivative = openmc.TallyDerivative(
+        variable='nuclide_density', material=1, nuclide='U235')
+    tt_model = openmc.Model(settings=openmc.Settings())
+    tt_model.tallies = openmc.Tallies([tally])
+
+    with pytest.raises(ValueError, match="tally derivatives"):
+        _check_tt_depletion_supported(
+            tt_model, 1.0e-8, "direct", "fission-q", "constant")
+
+
 def test_tt_depletion_rejects_multiple_mpi_ranks(monkeypatch):
     from openmc.deplete.coupled_operator import _check_tt_depletion_supported
 
@@ -329,6 +343,36 @@ def test_tt_operator_factorizes_atom_number_material_axis():
         op.number.get_mat_full_density_slice('600'), expected_density[-1])
     np.testing.assert_allclose(
         op.number.get_mat_atom_slice('600'), dense[-1, :2])
+
+
+def test_tt_update_materials_skips_dense_material_updates(monkeypatch):
+    """TT density transfer replaces dense material set_densities calls."""
+    from openmc.tt import tt_svd
+
+    class FakeMaterial:
+        def __init__(self):
+            self.set_densities = MagicMock()
+
+    fake_material = FakeMaterial()
+
+    op = object.__new__(CoupledOperator)
+    op.nuclides_with_data = {'U235'}
+    density_tt = tt_svd(np.array([[1.0e-24]]), eps=0.0)
+    op.number = TTAtomDensities(
+        ['1'], ['U235'], {'1': 2.0}, 1, density_tt, (1,), (1,), 0.0)
+
+    set_atom_density_tt = MagicMock()
+    monkeypatch.setattr(
+        openmc.lib.tt_density, "set_atom_density_tt", set_atom_density_tt)
+    monkeypatch.setattr(openmc.lib, "materials", {1: fake_material})
+
+    CoupledOperator._update_materials(op)
+
+    set_atom_density_tt.assert_called_once()
+    transferred_number = set_atom_density_tt.call_args.args[0]
+    assert isinstance(transferred_number, TTAtomDensities)
+    assert list(transferred_number.materials) == ['1']
+    fake_material.set_densities.assert_not_called()
 
 
 def test_tt_operator_returns_rates_context(monkeypatch):

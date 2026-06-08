@@ -3,12 +3,14 @@
 
 #include <cstdint>
 #include <string>
-#include <unordered_map>
+#include <unordered_set>
 
 #include "openmc/tt.h"
 #include "openmc/vector.h"
 
 namespace openmc {
+
+class Particle;
 
 //! Tensor-train storage for material atom densities.
 class AtomDensityTT {
@@ -34,12 +36,26 @@ public:
   //! Whether a material index is represented by the TT material axis.
   bool contains_material(int32_t material_index) const;
 
+  //! Whether the particle's current material is represented by the TT axis.
+  bool contains_material(const Particle& p) const;
+
   //! Get flat nuclide position in the tensor-train nuclide axis.
   int nuclide_position(int nuclide_index) const;
+
+  //! Whether a nuclide index is represented by the TT nuclide axis.
+  bool contains_nuclide(int nuclide_index) const;
 
   //! Reconstruct atom densities in [atom/b-cm] for one material.
   void reconstruct_material(
     int32_t material_index, vector<double>& density) const;
+
+  //! Reconstruct or reuse atom densities for the particle's current material.
+  const vector<double>& material_densities(Particle& p) const;
+
+  //! Get atom density in [atom/b-cm] for the particle material and nuclide.
+  bool atom_density(
+    Particle& p, int nuclide_index, double& density,
+    double rho_multiplier = 1.0) const;
 
   //! Material indices represented by the TT material axis.
   const vector<int32_t>& material_indices() const { return material_indices_; }
@@ -67,8 +83,9 @@ private:
   vector<int> mat_shape_;
   vector<int> nuc_shape_;
   TT density_tt_;
-  std::unordered_map<int32_t, int> material_pos_;
-  std::unordered_map<int, int> nuclide_pos_;
+  vector<int> material_pos_;
+  vector<int> nuclide_pos_;
+  std::unordered_set<int32_t> warned_sab_materials_;
 };
 
 namespace model {

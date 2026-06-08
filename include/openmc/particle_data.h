@@ -15,6 +15,8 @@
 
 namespace openmc {
 
+class AtomDensityTT;
+
 //==============================================================================
 // Constants
 //==============================================================================
@@ -488,6 +490,8 @@ private:
  *   https://doi.org/10.1016/j.anucene.2017.11.032.
  */
 class ParticleData : public GeometryState {
+  friend class AtomDensityTT;
+
 private:
   //==========================================================================
   // Data members -- see public: below for descriptions
@@ -496,6 +500,8 @@ private:
   vector<ElementMicroXS> photon_xs_;
   MacroXS macro_xs_;
   CacheDataMG mg_xs_cache_;
+  int atom_density_tt_material_ {C_NONE};
+  vector<double> atom_density_tt_;
 
   ParticleType type_;
 
@@ -598,6 +604,12 @@ public:
   // Multigroup macroscopic cross sections
   CacheDataMG& mg_xs_cache() { return mg_xs_cache_; }
   const CacheDataMG& mg_xs_cache() const { return mg_xs_cache_; }
+
+  // Tensor-train atom-density cache
+  void invalidate_atom_density_tt_cache()
+  {
+    atom_density_tt_material_ = C_NONE;
+  }
 
   // Particle type (n, p, e, gamma, etc)
   ParticleType& type() { return type_; }

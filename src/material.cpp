@@ -26,6 +26,7 @@
 #include "openmc/simulation.h"
 #include "openmc/string_utils.h"
 #include "openmc/thermal.h"
+#include "openmc/tt_density.h"
 #include "openmc/xml_interface.h"
 
 namespace openmc {
@@ -844,6 +845,31 @@ void Material::calculate_neutron_xs(Particle& p) const
     ncrystal_xs = ncrystal_mat_.xs(p);
   }
 
+  if (model::atom_density_tt.contains_material(p)) {
+    const auto& atom_density = model::atom_density_tt.material_densities(p);
+    const auto& nuclide = model::atom_density_tt.nuclide_indices();
+    const double density_mult = p.density_mult();
+
+    for (int i = 0; i < nuclide.size(); ++i) {
+      int i_nuclide = nuclide[i];
+      if (i_nuclide == C_NONE)
+        continue;
+
+      const double density = atom_density[i] * density_mult;
+      if (density == 0.0)
+        continue;
+
+      p.update_neutron_xs(i_nuclide, i_grid, C_NONE, 0.0, ncrystal_xs);
+      auto& micro = p.neutron_xs(i_nuclide);
+
+      p.macro_xs().total += density * micro.total;
+      p.macro_xs().absorption += density * micro.absorption;
+      p.macro_xs().fission += density * micro.fission;
+      p.macro_xs().nu_fission += density * micro.nu_fission;
+    }
+    return;
+  }
+
   // Add contribution from each nuclide in material
   for (int i = 0; i < nuclide_.size(); ++i) {
     // ======================================================================
@@ -1090,18 +1116,25 @@ void Material::to_hdf5(hid_t group) const
   vector<std::string> nuc_names;
   vector<std::string> macro_names;
   vector<double> nuc_densities;
+  // TT-backed materials may have released dense atom-density storage after TT
+  // transfer, so only serialize dense nuclide datasets when it exists.
+  const bool write_dense_nuclides = !atom_density_.empty();
   if (settings::run_CE) {
-    for (int i = 0; i < nuclide_.size(); ++i) {
-      int i_nuc = nuclide_[i];
-      nuc_names.push_back(data::nuclides[i_nuc]->name_);
-      nuc_densities.push_back(atom_density_(i));
+    if (write_dense_nuclides) {
+      for (int i = 0; i < nuclide_.size(); ++i) {
+        int i_nuc = nuclide_[i];
+        nuc_names.push_back(data::nuclides[i_nuc]->name_);
+        nuc_densities.push_back(atom_density_(i));
+      }
     }
   } else {
     for (int i = 0; i < nuclide_.size(); ++i) {
       int i_nuc = nuclide_[i];
       if (data::mg.nuclides_[i_nuc].awr != MACROSCOPIC_AWR) {
-        nuc_names.push_back(data::mg.nuclides_[i_nuc].name);
-        nuc_densities.push_back(atom_density_(i));
+        if (write_dense_nuclides) {
+          nuc_names.push_back(data::mg.nuclides_[i_nuc].name);
+          nuc_densities.push_back(atom_density_(i));
+        }
       } else {
         macro_names.push_back(data::mg.nuclides_[i_nuc].name);
       }
@@ -1390,7 +1423,8 @@ extern "C" int openmc_material_get_densities(
 {
   if (index >= 0 && index < model::materials.size()) {
     auto& mat = model::materials[index];
-    if (!mat->nuclides().empty()) {
+    if (!mat->nuclides().empty() &&
+        mat->densities().size() == mat->nuclides().size()) {
       *nuclides = mat->nuclides().data();
       *densities = mat->densities().data();
       *n = mat->nuclides().size();
