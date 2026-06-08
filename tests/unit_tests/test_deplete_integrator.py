@@ -355,20 +355,22 @@ def test_results_save_tt_atom_number(run_in_tmpdir):
     op._tt_eps = 0.0
     vol_dict = {"1": 2.0, "2": 4.0}
     nuc_list = ["U235", "Xe135"]
+    tracked_nuc_list = [*nuc_list, "O16"]
     burn_list = ["1", "2"]
     name_list = {mat: "" for mat in burn_list}
     op.get_results_info.return_value = (
         vol_dict, nuc_list, burn_list, burn_list, name_list)
     dense = np.array([
-        [1.0, 2.0],
-        [3.0, 4.0],
+        [1.0, 2.0, 5.0],
+        [3.0, 4.0, 6.0],
     ])
+    dense_burnable = dense[:, :len(nuc_list)]
     density = dense.copy()
     density[0] *= 1.0e-24 / vol_dict["1"]
     density[1] *= 1.0e-24 / vol_dict["2"]
     op.number = TTAtomDensities(
-        burn_list, nuc_list, vol_dict, 2, tt_svd(density, eps=0.0),
-        (2,), (2,), 0.0)
+        burn_list, tracked_nuc_list, vol_dict, len(nuc_list),
+        tt_svd(density, eps=0.0), (2,), (3,), 0.0)
     op_result = OperatorResult(
         ufloat(1.0, 0.1), _TTReactionRates(3.0))
 
@@ -376,16 +378,16 @@ def test_results_save_tt_atom_number(run_in_tmpdir):
         op, None, op_result, [0.0, 1.0], 1.0, 0, write_rates=False)
 
     with h5py.File('depletion_results.h5', 'r') as handle:
-        _assert_tt_atom_number_block(handle, 0, 0, dense)
+        _assert_tt_atom_number_block(handle, 0, 0, dense_burnable)
 
     reader = TTDepletionAtoms('depletion_results.h5')
     assert reader.n_steps == 1
     assert reader.index_mat == {"1": 0, "2": 1}
     assert reader.index_nuc == {"U235": 0, "Xe135": 1}
     np.testing.assert_allclose(
-        reader.get_material_atom_vector(0, "1"), dense[0])
+        reader.get_material_atom_vector(0, "1"), dense_burnable[0])
     np.testing.assert_allclose(
-        reader.get_material_atom_vector(-1, 2), dense[1])
+        reader.get_material_atom_vector(-1, 2), dense_burnable[1])
     assert reader.get_material_atoms(0, "2") == {
         "U235": pytest.approx(3.0), "Xe135": pytest.approx(4.0)}
 

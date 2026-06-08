@@ -57,6 +57,7 @@ from .error import *
 from .core import *
 from .nuclide import *
 from .material import *
+from . import tt_density
 from .cell import *
 from .mesh import *
 from .filter import *

@@ -74,6 +74,13 @@ int openmc_get_n_batches(int* n_batches, bool get_max_batches);
 int openmc_get_nuclide_index(const char name[], int* index);
 int openmc_add_unstructured_mesh(
   const char filename[], const char library[], int* id);
+int openmc_atom_density_tt_clear();
+int openmc_atom_density_tt_set(int n_materials,
+  const int32_t* material_indices, int n_nuclides,
+  const char** nuclide_names, const int* nuclide_indices, int mat_ndim,
+  const int* mat_shape, int nuc_ndim, const int* nuc_shape, int n_cores,
+  const int* core_shapes, const size_t* core_offsets, size_t core_data_size,
+  const double* core_data);
 int64_t openmc_get_seed();
 uint64_t openmc_get_stride();
 int openmc_get_tally_index(int32_t id, int32_t* index);

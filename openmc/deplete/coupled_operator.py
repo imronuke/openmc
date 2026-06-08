@@ -86,6 +86,41 @@ def _get_nuclides_with_data(cross_sections):
     return nuclides
 
 
+def _check_tt_depletion_supported(
+        model, tt_eps, reaction_rate_mode, normalization_mode,
+        fission_yield_mode):
+    """Check whether tensor-train depletion can be used."""
+    if tt_eps is None:
+        return
+
+    check_greater_than('tt_eps', tt_eps, 0.0)
+    if reaction_rate_mode != "direct":
+        raise ValueError(
+            "Tensor-train depletion currently requires "
+            "reaction_rate_mode='direct'.")
+    if normalization_mode != "fission-q":
+        raise ValueError(
+            "Tensor-train depletion currently requires "
+            "normalization_mode='fission-q'.")
+    if fission_yield_mode != "constant":
+        raise ValueError(
+            "Tensor-train depletion currently requires "
+            "fission_yield_mode='constant'.")
+    if model.settings.event_based is True:
+        raise ValueError(
+            "Tensor-train depletion is not supported with event-based mode.")
+    if model.settings.energy_mode == "multi-group":
+        raise ValueError(
+            "Tensor-train depletion is only supported in continuous-energy "
+            "mode.")
+    if model.settings.photon_transport is True:
+        raise ValueError(
+            "Tensor-train depletion is only supported with neutron transport.")
+    if comm.size != 1:
+        raise ValueError(
+            "Tensor-train depletion is not supported with multiple MPI ranks.")
+
+
 class CoupledOperator(OpenMCOperator):
     """Transport-coupled transport operator.
 
@@ -237,20 +272,9 @@ class CoupledOperator(OpenMCOperator):
                 warn("Fission Q dictionary will not be used")
                 fission_q = None
         check_type('tt_eps', tt_eps, Real, none_ok=True)
-        if tt_eps is not None:
-            check_greater_than('tt_eps', tt_eps, 0.0)
-            if reaction_rate_mode != "direct":
-                raise ValueError(
-                    "Tensor-train depletion currently requires "
-                    "reaction_rate_mode='direct'.")
-            if normalization_mode != "fission-q":
-                raise ValueError(
-                    "Tensor-train depletion currently requires "
-                    "normalization_mode='fission-q'.")
-            if fission_yield_mode != "constant":
-                raise ValueError(
-                    "Tensor-train depletion currently requires "
-                    "fission_yield_mode='constant'.")
+        _check_tt_depletion_supported(
+            model, tt_eps, reaction_rate_mode, normalization_mode,
+            fission_yield_mode)
         self._tt_depletion_used = tt_eps is not None
         self._tt_eps = tt_eps
         self.model = model
@@ -553,11 +577,13 @@ class CoupledOperator(OpenMCOperator):
 
         for rank in range(comm.size):
             number_i = comm.bcast(self.number, root=rank)
+            tt_densities = isinstance(number_i, ttd.TTAtomDensities)
+            if tt_densities:
+                openmc.lib.tt_density.set_atom_density_tt(number_i)
 
             for mat in number_i.materials:
                 nuclides = []
                 densities = []
-                tt_densities = isinstance(number_i, ttd.TTAtomDensities)
                 if tt_densities:
                     density_slice = number_i.get_mat_full_density_slice(mat)
                     set_negative_to_zero = False

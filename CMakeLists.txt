@@ -473,6 +473,7 @@ list(APPEND libopenmc_SOURCES
   src/timer.cpp
   src/track_output.cpp
   src/tt.cpp
+  src/tt_density.cpp
   src/universe.cpp
   src/urr.cpp
   src/volume_calc.cpp

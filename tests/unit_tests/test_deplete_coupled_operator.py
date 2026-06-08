@@ -89,6 +89,75 @@ def test_operator_init(model):
     CoupledOperator(model, CHAIN_PATH)
 
 
+def test_tt_depletion_rejects_event_based_mode():
+    from openmc.deplete.coupled_operator import _check_tt_depletion_supported
+
+    tt_model = openmc.Model(settings=openmc.Settings())
+    tt_model.settings.event_based = True
+
+    with pytest.raises(ValueError, match="event-based"):
+        _check_tt_depletion_supported(
+            tt_model, 1.0e-8, "direct", "fission-q", "constant")
+
+
+def test_tt_depletion_rejects_multigroup_mode():
+    from openmc.deplete.coupled_operator import _check_tt_depletion_supported
+
+    tt_model = openmc.Model(settings=openmc.Settings())
+    tt_model.settings.energy_mode = "multi-group"
+
+    with pytest.raises(ValueError, match="continuous-energy"):
+        _check_tt_depletion_supported(
+            tt_model, 1.0e-8, "direct", "fission-q", "constant")
+
+
+def test_tt_depletion_rejects_photon_transport():
+    from openmc.deplete.coupled_operator import _check_tt_depletion_supported
+
+    tt_model = openmc.Model(settings=openmc.Settings())
+    tt_model.settings.photon_transport = True
+
+    with pytest.raises(ValueError, match="neutron transport"):
+        _check_tt_depletion_supported(
+            tt_model, 1.0e-8, "direct", "fission-q", "constant")
+
+
+def test_tt_depletion_rejects_multiple_mpi_ranks(monkeypatch):
+    from openmc.deplete.coupled_operator import _check_tt_depletion_supported
+
+    tt_model = openmc.Model(settings=openmc.Settings())
+    comm = type("Comm", (), {"size": 2})()
+    monkeypatch.setattr("openmc.deplete.coupled_operator.comm", comm)
+
+    with pytest.raises(ValueError, match="multiple MPI ranks"):
+        _check_tt_depletion_supported(
+            tt_model, 1.0e-8, "direct", "fission-q", "constant")
+
+
+def test_atom_density_tt_transfer_to_c():
+    from openmc.tt import tt_svd
+
+    old_event_based = openmc.lib.settings.event_based
+    old_run_ce = openmc.lib.settings.run_CE
+
+    try:
+        openmc.lib.settings.event_based = False
+        openmc.lib.settings.run_CE = True
+        openmc.lib.tt_density.clear_atom_density_tt()
+
+        density = np.array([[1.0e-24, 2.0e-24, 3.0e-24],
+                            [4.0e-24, 5.0e-24, 6.0e-24]])
+        density_tt = tt_svd(density, eps=0.0)
+
+        openmc.lib.tt_density.set_atom_density_tt_data(
+            [0, 2], ['U235', 'Xe135', 'I135'], [0, -1, -1],
+            (2,), (3,), density_tt)
+    finally:
+        openmc.lib.tt_density.clear_atom_density_tt()
+        openmc.lib.settings.event_based = old_event_based
+        openmc.lib.settings.run_CE = old_run_ce
+
+
 def test_tt_material_rate_helpers():
     """TT helper path normalizes one material slice at a time."""
 
@@ -220,7 +289,8 @@ def test_tt_operator_replaces_atom_number():
     expected_density[1] *= 1.0e-24 / 4.0
     np.testing.assert_allclose(
         op.number.get_mat_full_density_slice('2'), expected_density[1])
-    np.testing.assert_allclose(op.number.get_mat_full_atom_slice('2'), dense[1])
+    np.testing.assert_allclose(
+        op.number.get_mat_atom_slice('2'), dense[1, :2])
 
     updated_atoms = dense + 10.0
     updated_density = updated_atoms.copy()
@@ -229,9 +299,36 @@ def test_tt_operator_replaces_atom_number():
     op.number.compress_from_density(updated_density)
 
     np.testing.assert_allclose(
-        op.number.get_mat_full_atom_slice('1'), updated_atoms[0])
+        op.number.get_mat_full_density_slice('1'), updated_density[0])
     np.testing.assert_allclose(
         op.number.get_mat_atom_slice('2'), updated_atoms[1, :2])
+
+
+def test_tt_operator_factorizes_atom_number_material_axis():
+    """CoupledOperator uses a factorized TT material axis."""
+
+    op = object.__new__(CoupledOperator)
+    op._tt_eps = 0.0
+    local_mats = [str(i + 1) for i in range(600)]
+    volume = {mat: 2.0 for mat in local_mats}
+    op.number = AtomNumber(local_mats, ['U235', 'U238', 'Xe135'], volume, 2)
+    dense = np.arange(1.0, 1801.0).reshape(600, 3)
+    op.number.number[:] = dense
+
+    op._convert_number_to_tt()
+
+    assert op.number.mat_shape == (20, 30)
+    assert op.number.nuc_shape == (3,)
+    assert op.number.density_tt.shape == (20, 30, 3)
+
+    expected_density = dense.copy()
+    expected_density *= 1.0e-24 / 2.0
+    np.testing.assert_allclose(
+        op.number.get_mat_full_density_slice('1'), expected_density[0])
+    np.testing.assert_allclose(
+        op.number.get_mat_full_density_slice('600'), expected_density[-1])
+    np.testing.assert_allclose(
+        op.number.get_mat_atom_slice('600'), dense[-1, :2])
 
 
 def test_tt_operator_returns_rates_context(monkeypatch):

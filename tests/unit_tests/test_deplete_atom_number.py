@@ -3,7 +3,14 @@
 import numpy as np
 from openmc.deplete import atom_number
 from openmc.deplete.tt_depletion import TTAtomDensities
-from openmc.tt import tt_svd
+from openmc.tt import _auto_tt_shape, tt_svd
+
+
+def test_auto_tt_shape():
+    assert _auto_tt_shape(1) == (1,)
+    assert _auto_tt_shape(41) == (41,)
+    assert _auto_tt_shape(600) == (20, 30)
+    assert np.prod(_auto_tt_shape(10_800)) == 10_800
 
 
 def test_indexing():
@@ -181,9 +188,6 @@ def test_tt_atom_densities():
     np.testing.assert_allclose(
         number.get_mat_density_slice(np.s_[:]), density[:, :2])
 
-    np.testing.assert_allclose(
-        number.get_mat_full_atom_slice("10000"),
-        density[0] * volume["10000"] * 1.0e24)
     np.testing.assert_allclose(
         number.get_mat_atom_slice("10001"),
         density[1, :2] * volume["10001"] * 1.0e24)

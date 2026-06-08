@@ -28,6 +28,7 @@
 #include "openmc/tallies/tally.h"
 #include "openmc/thermal.h"
 #include "openmc/timer.h"
+#include "openmc/tt_density.h"
 #include "openmc/volume_calc.h"
 #include "openmc/weight_windows.h"
 
@@ -172,6 +173,7 @@ int openmc_finalize()
   data::temperature_min = 0.0;
   data::temperature_max = INFTY;
   data::mg = {};
+  model::atom_density_tt.clear();
   model::root_universe = -1;
   model::plotter_seed = 1;
   openmc::openmc_set_seed(DEFAULT_SEED);
