@@ -1,0 +1,2 @@
+# The root .gitignore ignores generated example XML. This file is source input.
+!chain_simple.xml
