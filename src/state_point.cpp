@@ -16,6 +16,7 @@
 #include "openmc/file_utils.h"
 #include "openmc/hdf5_interface.h"
 #include "openmc/mcpl_interface.h"
+#include "openmc/memory_stats.h"
 #include "openmc/mesh.h"
 #include "openmc/message_passing.h"
 #include "openmc/mgxs_interface.h"
@@ -371,9 +372,13 @@ extern "C" int openmc_statepoint_write(const char* filename, bool* write_source)
     write_dataset(file_id, "n_realizations", simulation::n_realizations);
   }
 
+  memory_stats::sample();
+  memory_stats::collect();
+
   if (mpi::master) {
     // Write out the runtime metrics.
     using namespace simulation;
+    const auto& memory = memory_stats::summary();
     hid_t runtime_group = create_group(file_id, "runtime");
     write_dataset(
       runtime_group, "total initialization", time_initialize.elapsed());
@@ -399,6 +404,20 @@ extern "C" int openmc_statepoint_write(const char* filename, bool* write_source)
     write_dataset(runtime_group, "total", time_total.elapsed());
     write_dataset(
       runtime_group, "writing statepoints", time_statepoint.elapsed());
+    if (memory.resident_available) {
+      write_dataset(runtime_group, "average resident memory",
+        memory.average_resident);
+#ifdef OPENMC_MPI
+      if (mpi::n_procs > 1) {
+        write_dataset(runtime_group, "maximum average resident memory",
+          memory.max_average_resident);
+      }
+#endif
+    }
+    if (memory.peak_available) {
+      write_dataset(runtime_group, "peak resident memory",
+        memory.peak_resident);
+    }
     close_group(runtime_group);
 
     file_close(file_id);

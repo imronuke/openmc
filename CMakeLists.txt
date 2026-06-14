@@ -390,6 +390,7 @@ list(APPEND libopenmc_SOURCES
   src/material.cpp
   src/math_functions.cpp
   src/mcpl_interface.cpp
+  src/memory_stats.cpp
   src/mesh.cpp
   src/message_passing.cpp
   src/mgxs.cpp

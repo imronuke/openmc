@@ -10,6 +10,7 @@
 #include "openmc/geometry_aux.h"
 #include "openmc/ifp.h"
 #include "openmc/material.h"
+#include "openmc/memory_stats.h"
 #include "openmc/message_passing.h"
 #include "openmc/nuclide.h"
 #include "openmc/output.h"
@@ -79,6 +80,8 @@ int openmc_simulation_init()
   // Skip if simulation has already been initialized
   if (simulation::initialized)
     return 0;
+
+  memory_stats::reset();
 
   // Initialize nuclear data (energy limits, log grid)
   if (settings::run_CE) {
@@ -164,6 +167,7 @@ int openmc_simulation_init()
 
   // Set flag indicating initialization is done
   simulation::initialized = true;
+  memory_stats::sample();
   return 0;
 }
 
@@ -214,6 +218,8 @@ int openmc_simulation_finalize()
   // Stop timers and show timing statistics
   simulation::time_finalize.stop();
   simulation::time_total.stop();
+  memory_stats::sample();
+  memory_stats::collect();
 
 #ifdef OPENMC_MPI
   // Reduce track count across ranks for correct reporting. In shared secondary
@@ -539,6 +545,7 @@ void finalize_batch()
   if (settings::collision_track) {
     collision_track_flush_bank();
   }
+  memory_stats::sample();
 }
 
 void initialize_generation()

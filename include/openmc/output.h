@@ -54,6 +54,9 @@ void print_generation();
 //! Display time elapsed for various stages of a run
 void print_runtime();
 
+//! Display resident memory statistics
+void print_memory_stats();
+
 //! Display results for global tallies including k-effective estimators
 void print_results();
 

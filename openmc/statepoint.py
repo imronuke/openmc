@@ -112,7 +112,7 @@ class StatePoint:
         Simulation run mode, e.g. 'eigenvalue'
     runtime : dict
         Dictionary whose keys are strings describing various runtime metrics
-        and whose values are time values in seconds.
+        and whose values are time values in seconds or memory values in bytes.
     seed : int
         Pseudorandom number generator seed
     stride : int

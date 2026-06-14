@@ -658,6 +658,7 @@ void RandomRaySimulation::print_results_random_ray(
     show_time("Time writing statepoints", time_statepoint.elapsed());
     show_time("Total time for finalization", time_finalize.elapsed());
     show_time("Time per integration", time_per_integration);
+    print_memory_stats();
   }
 
   if (settings::verbosity >= 4 && settings::run_mode == RunMode::EIGENVALUE) {

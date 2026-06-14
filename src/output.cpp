@@ -27,6 +27,7 @@
 #include "openmc/geometry.h"
 #include "openmc/lattice.h"
 #include "openmc/math_functions.h"
+#include "openmc/memory_stats.h"
 #include "openmc/message_passing.h"
 #include "openmc/mgxs_interface.h"
 #include "openmc/nuclide.h"
@@ -427,6 +428,38 @@ void show_rate(const char* label, double particles_per_sec)
   fmt::print(" {:<33} = {:.6} particles/second\n", label, particles_per_sec);
 }
 
+void show_memory(const char* label, double bytes)
+{
+  constexpr double BYTES_PER_MIB = 1024.0 * 1024.0;
+  fmt::print(" {:<33} = {:10.4f} MiB\n", label, bytes / BYTES_PER_MIB);
+}
+
+void print_memory_stats()
+{
+  const auto& memory = memory_stats::summary();
+  if (!memory.resident_available && !memory.peak_available)
+    return;
+
+  header("Memory Statistics", 6);
+  if (settings::verbosity < 6)
+    return;
+
+  if (mpi::n_procs > 1) {
+    if (memory.resident_available) {
+      show_memory("Average resident memory/rank", memory.average_resident);
+      show_memory("Maximum avg memory/rank", memory.max_average_resident);
+    }
+    if (memory.peak_available)
+      show_memory("Peak resident memory/rank", memory.peak_resident);
+  } else {
+    if (memory.resident_available)
+      show_memory("Average resident memory", memory.average_resident);
+    if (memory.peak_available)
+      show_memory("Peak resident memory", memory.peak_resident);
+  }
+  std::fflush(stdout);
+}
+
 void print_runtime()
 {
   using namespace simulation;
@@ -509,6 +542,7 @@ void print_runtime()
     fmt::print(
       " {:<33} = {:.6} tracks/second\n", "Track Rate (active)", speed_tracks);
   }
+  print_memory_stats();
 }
 
 //==============================================================================

@@ -4,7 +4,7 @@
 State Point File Format
 =======================
 
-The current version of the statepoint file format is 18.2.
+The current version of the statepoint file format is 18.3.
 
 **/**
 
@@ -172,7 +172,11 @@ The current version of the statepoint file format is 18.2.
 
 **/runtime/**
 
-All values are given in seconds and are measured on the master process.
+Runtime timing values are measured on the master process and are given in
+seconds. Resident memory values are given in bytes. For MPI calculations,
+``average resident memory`` is the average of rank-local sampled averages,
+``maximum average resident memory`` is the maximum rank-local sampled average,
+and ``peak resident memory`` is the maximum rank-local peak resident memory.
 
 :Datasets: - **total initialization** (*double*) -- Time spent reading inputs,
              allocating arrays, etc.
@@ -197,3 +201,9 @@ All values are given in seconds and are measured on the master process.
              tally results and evaluating their statistics.
            - **writing statepoints** (*double*) -- Time spent writing statepoint
              files
+           - **average resident memory** (*double*) -- Average sampled resident
+             memory.
+           - **maximum average resident memory** (*double*) -- Maximum
+             rank-local average sampled resident memory. Only present for MPI
+             calculations.
+           - **peak resident memory** (*double*) -- Peak resident memory.
