@@ -18,7 +18,7 @@ __all__ = ["TTAtomDensities", "TTDepletionAtoms", "TTDepletionRates"]
 
 _TT_DEPLETION_ATOM_NUMBERS = "tt_depletion_atom_numbers"
 _TT_DEPLETION_RATES = "tt_depletion_reaction_rates"
-_NEGATIVE_ATOM_DENSITY_THRESHOLD = -1.0e-21
+_TT_ATOM_DENSITY_CLEANUP_FLOOR = 1.0e-12
 
 
 def _tt_filter_split(tt_shape, score_size):
@@ -153,7 +153,7 @@ class TTAtomDensities:
             raise IndexError("Material index is out of bounds.")
         prefix = _flat_to_tt_index(mat_index, self.mat_shape)
         density = self.density_tt._contract_slice(prefix).reshape(-1, order='C')
-        _clip_significant_negative_densities(density)
+        _clip_tt_atom_densities(density)
         return density
 
     def __getitem__(self, pos):
@@ -234,17 +234,17 @@ def _copy_tt_mean(tt, n_realizations):
     return TT(cores)
 
 
-def _clip_significant_negative_atoms(atom_number, volume):
-    """Clip atom numbers below the material-density warning threshold."""
-    threshold = _NEGATIVE_ATOM_DENSITY_THRESHOLD * volume * 1.0e24
+def _clip_tt_atom_numbers(atom_number, volume):
+    """Clip TT atom numbers below the material-density cleanup floor."""
+    threshold = _TT_ATOM_DENSITY_CLEANUP_FLOOR * volume * 1.0e24
     if atom_number.size and np.min(atom_number) < threshold:
         atom_number[atom_number < threshold] = 0.0
 
 
-def _clip_significant_negative_densities(density):
-    """Clip atom densities below the material-density warning threshold."""
-    if density.size and np.min(density) < _NEGATIVE_ATOM_DENSITY_THRESHOLD:
-        density[density < _NEGATIVE_ATOM_DENSITY_THRESHOLD] = 0.0
+def _clip_tt_atom_densities(density):
+    """Clip TT atom densities below the cleanup floor."""
+    if density.size and np.min(density) < _TT_ATOM_DENSITY_CLEANUP_FLOOR:
+        density[density < _TT_ATOM_DENSITY_CLEANUP_FLOOR] = 0.0
 
 
 def _write_tt_hdf5(group, name, tt):
@@ -267,7 +267,7 @@ def _get_tt_atom_number_write_data(tt_eps, atom_number, volume=None):
         clipped = False
         for i, mat_volume in enumerate(volume):
             threshold = (
-                _NEGATIVE_ATOM_DENSITY_THRESHOLD * mat_volume * 1.0e24)
+                _TT_ATOM_DENSITY_CLEANUP_FLOOR * mat_volume * 1.0e24)
             atom_slice = atom_number[i]
             if atom_slice.size and np.min(atom_slice) < threshold:
                 if not clipped:
@@ -489,7 +489,7 @@ class TTDepletionAtoms:
 
         atom_number = atom_tt._contract_slice(
             (local_mat_index,)).reshape(-1, order='C')
-        _clip_significant_negative_atoms(atom_number, self.volume[mat])
+        _clip_tt_atom_numbers(atom_number, self.volume[mat])
         return atom_number
 
     def get_material_atom_vector(self, step, mat):
