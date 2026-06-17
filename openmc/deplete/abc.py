@@ -40,6 +40,15 @@ __all__ = [
     "Integrator", "SIIntegrator", "DepSystemSolver", "add_params"]
 
 
+def _format_depletion_time(seconds):
+    """Format depletion time in hours or days."""
+
+    hours = seconds / _SECONDS_PER_HOUR
+    if hours < 24.0:
+        return f"{hours:.6g} h"
+    return f"{seconds / _SECONDS_PER_DAY:.6g} d"
+
+
 def _normalize_timesteps(
         timesteps: Sequence[float] | Sequence[tuple[float, str]],
         source_rates: float | Sequence[float],
@@ -945,7 +954,9 @@ class Integrator(ABC):
 
             for i, (dt, source_rate) in enumerate(self):
                 if output and comm.rank == 0:
-                    print(f"[openmc.deplete] t={t} s, dt={dt} s, source={source_rate}")
+                    print(
+                        f"[openmc.deplete] t={_format_depletion_time(t)}, "
+                        f"dt={_format_depletion_time(dt)}, source={source_rate}")
 
                 # Get beginning-of-step data from operator or restart results
                 n, res, keff_search_root = self._get_bos_data(i, source_rate, n)
@@ -982,7 +993,9 @@ class Integrator(ABC):
             # just return zero reaction rates without actually doing a transport
             # solve)
             if output and final_step and comm.rank == 0:
-                print(f"[openmc.deplete] t={t} (final operator evaluation)")
+                print(
+                    f"[openmc.deplete] t={_format_depletion_time(t)} "
+                    "(final operator evaluation)")
             if self._keff_search_control is not None and source_rate != 0.0:
                 if tt_depletion_used:
                     keff_input = list(
@@ -1433,7 +1446,9 @@ class SIIntegrator(Integrator):
             res_end = None  # Will be set in first iteration
             for i, (dt, p) in enumerate(self):
                 if output:
-                    print(f"[openmc.deplete] t={t} s, dt={dt} s, source={p}")
+                    print(
+                        f"[openmc.deplete] t={_format_depletion_time(t)}, "
+                        f"dt={_format_depletion_time(dt)}, source={p}")
 
                 if i == 0:
                     if self.operator.prev_res is None:
