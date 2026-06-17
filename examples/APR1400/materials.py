@@ -5,9 +5,8 @@ from typing import NamedTuple
 import openmc
 
 from constants import (
-    FUEL_CODE_PLOT_COLORS, FUEL_TEMPERATURE_K, GRIDMIX_BORON_PPM,
-    GRIDMIX_TEMPERATURE_K, MATERIAL_TYPE_PLOT_COLORS, MOD_BORON_PPM,
-    MOD_TEMPERATURE_K
+    FUEL_CODE_PLOT_COLORS, FUEL_TEMPERATURE_K, GRIDMIX_TEMPERATURE_K,
+    MATERIAL_TYPE_PLOT_COLORS, MOD_TEMPERATURE_K
 )
 
 
@@ -27,6 +26,8 @@ class MaterialSet(NamedTuple):
     gridmix: openmc.Material
     mod: openmc.Material
     ss304: openmc.Material
+    rpv: openmc.Material
+    detector: openmc.Material
     spring: openmc.Material
 
 
@@ -167,6 +168,39 @@ SS304 = (
     ('Ni61', 7.93722e-5),
     ('Ni62', 2.53073e-4),
     ('Ni64', 6.44503e-5),
+)
+
+RPV = (
+    ('C0', 7.47816436e-4),
+    ('Si28', 1.241846e-4),
+    ('Si29', 6.308672e-6),
+    ('Si30', 4.163589e-6),
+    ('P31', 9.157520e-6),
+    ('S32', 2.801334e-6),
+    ('S33', 2.211812e-8),
+    ('S34', 1.253360e-7),
+    ('S36', 2.949083e-10),
+    ('Cr50', 6.715657e-6),
+    ('Cr52', 1.295048e-4),
+    ('Cr53', 1.468480e-5),
+    ('Cr54', 3.655357e-6),
+    ('Mn55', 1.161666e-3),
+    ('Fe54', 4.793128e-3),
+    ('Fe56', 7.524186e-2),
+    ('Fe57', 1.737663e-3),
+    ('Fe58', 2.312510e-4),
+    ('Ni58', 4.496193e-4),
+    ('Ni60', 1.731925e-4),
+    ('Ni61', 7.528560e-6),
+    ('Ni62', 2.400434e-5),
+    ('Ni64', 6.113198e-6),
+    ('Mo92', 3.650996e-5),
+    ('Mo94', 2.299148e-5),
+    ('Mo95', 3.980164e-5),
+    ('Mo96', 4.188720e-5),
+    ('Mo97', 2.412220e-5),
+    ('Mo98', 6.128547e-5),
+    ('Mo100', 2.467500e-5),
 )
 
 SPRING = (
@@ -313,13 +347,13 @@ def _fuel_material(name, atom_densities, fuel_code):
     return material
 
 
-def _gridmix():
+def _gridmix(ppm):
     """Return the selected GRIDMIX material."""
 
     try:
         atom_densities = (
             ('H1', GRIDMIX_H1[GRIDMIX_TEMPERATURE_K]),
-            *GRIDMIX_BORON[GRIDMIX_TEMPERATURE_K][GRIDMIX_BORON_PPM],
+            *GRIDMIX_BORON[GRIDMIX_TEMPERATURE_K][ppm],
             ('O16', GRIDMIX_O16[GRIDMIX_TEMPERATURE_K]),
             *GRIDMIX_STRUCTURAL,
         )
@@ -333,11 +367,11 @@ def _gridmix():
     return material
 
 
-def _mod():
+def _mod(ppm):
     """Return the selected MOD material."""
 
     try:
-        atom_densities = MOD[MOD_TEMPERATURE_K][MOD_BORON_PPM]
+        atom_densities = MOD[MOD_TEMPERATURE_K][ppm]
     except KeyError as exc:
         raise ValueError(
             'Unsupported MOD temperature or boron ppm') from exc
@@ -348,8 +382,41 @@ def _mod():
     return material
 
 
-def create_materials():
-    """Create the materials used by the assembly model."""
+def _detector():
+    """Return U3O8 detector material with 93 wt% U235 enrichment."""
+
+    u235_weight = 0.93
+    u238_weight = 1.0 - u235_weight
+    u235_atoms = u235_weight / openmc.data.atomic_mass('U235')
+    u238_atoms = u238_weight / openmc.data.atomic_mass('U238')
+    total_u_atoms = u235_atoms + u238_atoms
+
+    material = openmc.Material(name='DETECTOR')
+    material.set_density('g/cm3', 8.3)
+    material.temperature = 294.0
+    material.add_nuclide('U235', 3.0 * u235_atoms / total_u_atoms)
+    material.add_nuclide('U238', 3.0 * u238_atoms / total_u_atoms)
+    material.add_nuclide('O16', 8.0)
+    return material
+
+
+def _rpv():
+    """Return SA508 RPV steel material."""
+
+    material = _atom_density_material('RPV', RPV)
+    material.temperature = 294.0
+    return material
+
+
+def create_materials(ppm=1000):
+    """Create the materials used by the assembly model.
+
+    Parameters
+    ----------
+    ppm : int, optional
+        Soluble boron concentration used for the MOD and GRIDMIX materials.
+        The default 1000 ppm preserves the base APR1400 model condition.
+    """
 
     return MaterialSet(
         uo2_171=_fuel_material('F', UO2_171, 0),
@@ -362,8 +429,10 @@ def create_materials():
         air=_atom_density_material('AIR', AIR),
         zirlo=_atom_density_material('ZIRLO', ZIRLO),
         inc625=_atom_density_material('INC625', INC625),
-        gridmix=_gridmix(),
-        mod=_mod(),
+        gridmix=_gridmix(ppm),
+        mod=_mod(ppm),
         ss304=_atom_density_material('SS304', SS304),
+        rpv=_rpv(),
+        detector=_detector(),
         spring=_atom_density_material('SPRING', SPRING),
     )

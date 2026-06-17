@@ -128,3 +128,5 @@ if __name__ == '__main__':
         run_normal(model)
     elif args.run == 'depletion':
         run_depletion(model)
+
+    print("--OpenMC exit normally--")
