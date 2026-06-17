@@ -21,8 +21,6 @@ from openmc.data import DataLibrary
 from openmc.exceptions import DataError
 import openmc.lib
 from openmc.mpi import comm
-from openmc.tt import _auto_tt_shape, tt_svd
-from . import tt_depletion as ttd
 from .abc import OperatorResult
 from .openmc_operator import OpenMCOperator
 from .pool import _distribute
@@ -31,6 +29,7 @@ from .helpers import (
     DirectReactionRateHelper, ChainFissionHelper, ConstantFissionYieldHelper,
     FissionYieldCutoffHelper, AveragedFissionYieldHelper, EnergyScoreHelper,
     SourceRateHelper, FluxCollapseHelper)
+from .tt_depletion import _TTReactionRates, _prepare_tt_reaction_rates
 
 
 __all__ = ["CoupledOperator", "Operator", "OperatorResult"]
@@ -241,18 +240,13 @@ class CoupledOperator(OpenMCOperator):
             check_greater_than('tt_eps', tt_eps, 0.0)
             if reaction_rate_mode != "direct":
                 raise ValueError(
-                    "Tensor-train depletion currently requires "
+                    "Tensor-train reaction-rate mode currently requires "
                     "reaction_rate_mode='direct'.")
             if normalization_mode != "fission-q":
                 raise ValueError(
-                    "Tensor-train depletion currently requires "
+                    "Tensor-train reaction-rate mode currently requires "
                     "normalization_mode='fission-q'.")
-            if fission_yield_mode != "constant":
-                raise ValueError(
-                    "Tensor-train depletion currently requires "
-                    "fission_yield_mode='constant'.")
         self._tt_depletion_used = tt_eps is not None
-        self._tt_eps = tt_eps
         self.model = model
 
         # determine set of materials in the model
@@ -289,31 +283,6 @@ class CoupledOperator(OpenMCOperator):
             fission_q=fission_q,
             helper_kwargs=helper_kwargs,
             reduce_chain_level=reduce_chain_level)
-
-        if self._tt_depletion_used:
-            self._convert_number_to_tt()
-
-    def _convert_number_to_tt(self):
-        """Replace dense AtomNumber with a TT-backed density container."""
-        local_mats = list(self.number.materials)
-        nuclides = list(self.number.nuclides)
-        volume = {
-            mat: self.number.get_mat_volume(mat)
-            for mat in local_mats
-        }
-        mat_shape = _auto_tt_shape(len(local_mats)) if local_mats else (0,)
-        nuc_shape = (self.number.n_nuc,)
-        if local_mats:
-            density = self.number.number.copy()
-            density *= 1.0e-24 / self.number.volume[:, None]
-            density_tt = tt_svd(
-                density.reshape(mat_shape + nuc_shape, order='C'),
-                eps=self._tt_eps)
-        else:
-            density_tt = None
-        self.number = ttd.TTAtomDensities(
-            local_mats, nuclides, volume, self.number.n_nuc_burn,
-            density_tt, mat_shape, nuc_shape, self._tt_eps)
 
     def _differentiate_burnable_mats(self):
         """Assign distribmats for each burnable material"""
@@ -433,15 +402,6 @@ class CoupledOperator(OpenMCOperator):
         # Generate tallies in memory
         materials = [openmc.lib.materials[int(i)] for i in self.burnable_mats]
 
-        if self._tt_depletion_used:
-            self._rate_helper.generate_tallies(
-                materials, self.chain.reactions)
-            self._normalization_helper.prepare(
-                self.chain.nuclides, self.reaction_rates.index_nuc)
-            self._yield_helper.generate_tallies(
-                materials, tuple(sorted(self._mat_index_map.values())))
-            return None
-
         return super().initial_condition(materials)
 
     def _generate_materials_xml(self):
@@ -492,20 +452,13 @@ class CoupledOperator(OpenMCOperator):
         if self._n_calls > 0:
             openmc.lib.reset_timers()
 
-        if self._tt_depletion_used:
-            self._update_materials()
-            nuclides = self._get_reaction_nuclides()
-            self._rate_helper.nuclides = nuclides
-            self._normalization_helper.nuclides = nuclides
-            self._yield_helper.update_tally_nuclides(nuclides)
-        else:
-            self._update_materials_and_nuclides(vec)
+        self._update_materials_and_nuclides(vec)
 
         # If the source rate is zero, return zero reaction rates without running
         # a transport solve
         if source_rate == 0.0:
             if self._tt_depletion_used:
-                rates = ttd._TTReactionRates(0.0, zero_source=True)
+                rates = _TTReactionRates(0.0, zero_source=True)
             else:
                 rates = self.reaction_rates.copy()
                 rates.fill(0.0)
@@ -516,10 +469,10 @@ class CoupledOperator(OpenMCOperator):
 
         # Extract results
         if self._tt_depletion_used:
-            normalization_factor = ttd._prepare_tt_reaction_rates(
+            normalization_factor = _prepare_tt_reaction_rates(
                 self, source_rate)
             mask = vars(self).get('_tt_reaction_rate_mask')
-            rates = ttd._TTReactionRates(
+            rates = _TTReactionRates(
                 normalization_factor, reaction_rate_mask=mask)
             self._print_tt_storage_reports()
         else:
@@ -542,7 +495,7 @@ class CoupledOperator(OpenMCOperator):
         dense_bytes = report['dense_accumulated_bytes']
         tt_bytes = report['tt_accumulated_bytes']
 
-        print("Tensor-train depletion tally accumulated storage:")
+        print("Tensor-train reaction-rate tally accumulated storage:")
         print(f"  dense accumulated storage        {dense_bytes} bytes")
         print(f"  TT accumulated storage           {tt_bytes} bytes")
         print("  accumulated compression ratio    "
@@ -557,21 +510,12 @@ class CoupledOperator(OpenMCOperator):
             for mat in number_i.materials:
                 nuclides = []
                 densities = []
-                tt_densities = isinstance(number_i, ttd.TTAtomDensities)
-                if tt_densities:
-                    density_slice = number_i.get_mat_full_density_slice(mat)
-                    set_negative_to_zero = False
-                else:
-                    atoms = number_i[mat, :]
-                    normalization = 1.0e-24 / number_i.get_mat_volume(mat)
-                    set_negative_to_zero = True
+                atoms = number_i[mat, :]
+                normalization = 1.0e-24 / number_i.get_mat_volume(mat)
                 for nuc in number_i.nuclides:
                     if nuc in self.nuclides_with_data:
                         i_nuc = number_i.index_nuc[nuc]
-                        if tt_densities:
-                            val = density_slice[i_nuc]
-                        else:
-                            val = normalization * atoms[i_nuc]
+                        val = normalization * atoms[i_nuc]
 
                         # If nuclide is zero, do not add to the problem.
                         if val > 0.0:
@@ -594,8 +538,7 @@ class CoupledOperator(OpenMCOperator):
 
                                       ' atom/b-cm)')
 
-                                if set_negative_to_zero:
-                                    number_i[mat, nuc] = 0.0
+                                number_i[mat, nuc] = 0.0
 
                 # Update densities on C API side
                 mat_internal = openmc.lib.materials[int(mat)]

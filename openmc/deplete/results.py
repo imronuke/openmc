@@ -7,8 +7,7 @@ from warnings import warn
 import h5py
 import numpy as np
 
-from . import stepresult
-from . import tt_depletion as ttd
+from .stepresult import StepResult, VERSION_RESULTS
 import openmc.checkvalue as cv
 from openmc.data import atomic_mass, AVOGADRO
 from openmc.data.library import DataLibrary
@@ -69,10 +68,13 @@ class Results(list):
         if filename is not None:
             with h5py.File(str(filename), "r") as fh:
                 cv.check_filetype_version(
-                    fh, 'depletion results', stepresult.VERSION_RESULTS[0])
+                    fh, 'depletion results', VERSION_RESULTS[0])
 
                 # Get number of results stored
-                data = ttd._load_results_data(fh, stepresult.StepResult)
+                n = fh["number"].shape[0]
+
+                for i in range(n):
+                    data.append(StepResult.from_hdf5(fh, i))
         super().__init__(data)
 
     @classmethod
@@ -580,7 +582,6 @@ class Results(list):
             and original isotopic compositions of non-depletable materials
         """
         result = self[burnup_index]
-        ttd._require_dense_atom_numbers(result)
 
         # Only materials found in the original materials.xml file will be
         # updated. If for some reason you have modified OpenMC to produce

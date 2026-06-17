@@ -16,13 +16,13 @@ from uncertainties import ufloat
 import pytest
 
 from openmc.mpi import comm
-from openmc.tt import TT, tt_svd
+from openmc.tt import TT
 from openmc.deplete import (
     ReactionRates, StepResult, Results, OperatorResult, PredictorIntegrator,
     CECMIntegrator, CF4Integrator, CELIIntegrator, EPCRK4Integrator,
-    LEQIIntegrator, SICELIIntegrator, SILEQIIntegrator, TTDepletionAtoms,
-    TTDepletionRates, cram, pool)
-from openmc.deplete.tt_depletion import TTAtomDensities, _TTReactionRates
+    LEQIIntegrator, SICELIIntegrator, SILEQIIntegrator, TTDepletionRates,
+    cram, pool)
+from openmc.deplete.tt_depletion import _TTReactionRates
 
 from tests import dummy_operator
 
@@ -39,21 +39,11 @@ INTEGRATORS = [
 ]
 
 
-def _assert_tt_atom_number_block(handle, step, block, expected):
-    assert 'number' not in handle
-    tt_group = handle[
-        f'tt_depletion_atom_numbers/steps/{step}/blocks/{block}/atom_number']
-    atom_tt = TT.from_hdf5(tt_group)
-    np.testing.assert_allclose(atom_tt._contract_slice(()), expected)
-
-
-def _tt_atom_densities(local_mats, nuclides, volume, atoms):
-    density = np.asarray(atoms, dtype=float).copy()
-    for i, mat in enumerate(local_mats):
-        density[i] *= 1.0e-24 / volume[mat]
-    return TTAtomDensities(
-        local_mats, nuclides, volume, len(nuclides),
-        tt_svd(density, eps=0.0), (len(local_mats),), (len(nuclides),), 0.0)
+def _assert_dense_atom_numbers(handle, step, block, expected):
+    assert 'number' in handle
+    expected = np.asarray(expected)
+    np.testing.assert_allclose(
+        handle['number'][step, block:block + len(expected)], expected)
 
 
 def test_results_save(run_in_tmpdir):
@@ -175,7 +165,6 @@ def test_results_save_tt_rates(run_in_tmpdir):
     op = MagicMock()
     op.prev_res = None
     op._tt_depletion_used = True
-    op._tt_eps = 0.0
     vol_dict = {"1": 2.0}
     nuc_list = ["U235", "Xe135"]
     burn_list = ["1"]
@@ -208,7 +197,7 @@ def test_results_save_tt_rates(run_in_tmpdir):
 
     with h5py.File('depletion_results.h5', 'r') as handle:
         assert 'reaction rates' not in handle
-        _assert_tt_atom_number_block(handle, 0, 0, np.asarray(x))
+        _assert_dense_atom_numbers(handle, 0, 0, x)
         assert 'reactions' in handle
         assert handle['nuclides/U235'].attrs['reaction rate index'] == 0
         assert handle['reactions/fission'].attrs['index'] == 0
@@ -238,6 +227,12 @@ def test_results_save_tt_rates(run_in_tmpdir):
         np.testing.assert_allclose(tt_mean['core_1'][()], cores[1].ravel())
         np.testing.assert_allclose(tt_mean['core_2'][()], cores[2].ravel())
 
+    results = Results('depletion_results.h5')
+    np.testing.assert_allclose(results[0].data, [[1.0, 2.0]])
+    times, atoms = results.get_atoms("1", "Xe135")
+    np.testing.assert_allclose(times, [0.0])
+    np.testing.assert_allclose(atoms, [2.0])
+
 
 def test_tt_depletion_rates_reader(run_in_tmpdir):
     """TTDepletionRates reconstructs requested reaction rates on demand."""
@@ -245,7 +240,6 @@ def test_tt_depletion_rates_reader(run_in_tmpdir):
     op = MagicMock()
     op.prev_res = None
     op._tt_depletion_used = True
-    op._tt_eps = 0.0
     vol_dict = {"1": 2.0}
     nuc_list = ["U235"]
     burn_list = ["1"]
@@ -276,7 +270,7 @@ def test_tt_depletion_rates_reader(run_in_tmpdir):
         op, x, op_result, [0.0, 1.0], 1.0, 0, write_rates=True)
 
     with h5py.File('depletion_results.h5', 'r') as handle:
-        _assert_tt_atom_number_block(handle, 0, 0, np.asarray(x))
+        _assert_dense_atom_numbers(handle, 0, 0, x)
 
     reader = TTDepletionRates('depletion_results.h5')
     assert reader.tt_eps == 1.0e-12
@@ -304,7 +298,6 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
     op = MagicMock()
     op.prev_res = None
     op._tt_depletion_used = True
-    op._tt_eps = 0.0
     vol_dict = {"1": 2.0}
     nuc_list = ["U235"]
     burn_list = ["1"]
@@ -326,7 +319,7 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
 
     with h5py.File('depletion_results.h5', 'r') as handle:
         assert 'reaction rates' not in handle
-        _assert_tt_atom_number_block(handle, 0, 0, np.asarray(x))
+        _assert_dense_atom_numbers(handle, 0, 0, x)
         group = handle['tt_depletion_reaction_rates']
         assert group.attrs['tt_eps'] == 1.0e-30
         np.testing.assert_array_equal(
@@ -346,13 +339,12 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
     np.testing.assert_allclose(reader.to_reaction_rates(0), [[[0.0]]])
 
 
-def test_results_save_tt_atom_number(run_in_tmpdir):
-    """StepResult.save can write TT-backed atom-number data."""
+def test_results_save_tt_mode_dense_atom_number(run_in_tmpdir):
+    """StepResult.save writes dense atom-number data in TT-rate mode."""
 
     op = MagicMock()
     op.prev_res = None
     op._tt_depletion_used = True
-    op._tt_eps = 0.0
     vol_dict = {"1": 2.0, "2": 4.0}
     nuc_list = ["U235", "Xe135"]
     burn_list = ["1", "2"]
@@ -363,46 +355,14 @@ def test_results_save_tt_atom_number(run_in_tmpdir):
         [1.0, 2.0],
         [3.0, 4.0],
     ])
-    density = dense.copy()
-    density[0] *= 1.0e-24 / vol_dict["1"]
-    density[1] *= 1.0e-24 / vol_dict["2"]
-    op.number = TTAtomDensities(
-        burn_list, nuc_list, vol_dict, 2, tt_svd(density, eps=0.0),
-        (2,), (2,), 0.0)
     op_result = OperatorResult(
         ufloat(1.0, 0.1), _TTReactionRates(3.0))
 
     StepResult.save(
-        op, None, op_result, [0.0, 1.0], 1.0, 0, write_rates=False)
+        op, list(dense), op_result, [0.0, 1.0], 1.0, 0, write_rates=False)
 
     with h5py.File('depletion_results.h5', 'r') as handle:
-        _assert_tt_atom_number_block(handle, 0, 0, dense)
-
-    reader = TTDepletionAtoms('depletion_results.h5')
-    assert reader.n_steps == 1
-    assert reader.index_mat == {"1": 0, "2": 1}
-    assert reader.index_nuc == {"U235": 0, "Xe135": 1}
-    np.testing.assert_allclose(
-        reader.get_material_atom_vector(0, "1"), dense[0])
-    np.testing.assert_allclose(
-        reader.get_material_atom_vector(-1, 2), dense[1])
-    assert reader.get_material_atoms(0, "2") == {
-        "U235": pytest.approx(3.0), "Xe135": pytest.approx(4.0)}
-
-    times, atoms = reader.get_atoms("2", "Xe135")
-    np.testing.assert_allclose(times, [0.0])
-    np.testing.assert_allclose(atoms, [4.0])
-    _, atom_per_bcm = reader.get_atoms("2", "Xe135", nuc_units="atom/b-cm")
-    np.testing.assert_allclose(atom_per_bcm, [1.0e-24])
-    _, atom_per_cm3 = reader.get_atoms("2", "Xe135", nuc_units="atom/cm3")
-    np.testing.assert_allclose(atom_per_cm3, [1.0])
-
-    material = reader.get_material(0, "2")
-    assert material.id == 2
-    assert material.volume == 4.0
-    atom_densities = material.get_nuclide_atom_densities()
-    np.testing.assert_allclose(atom_densities["U235"], 0.75e-24)
-    np.testing.assert_allclose(atom_densities["Xe135"], 1.0e-24)
+        _assert_dense_atom_numbers(handle, 0, 0, dense)
 
     results = Results('depletion_results.h5')
     assert len(results) == 1
@@ -410,58 +370,13 @@ def test_results_save_tt_atom_number(run_in_tmpdir):
     np.testing.assert_allclose(time, [0.0])
     np.testing.assert_allclose(keff, [[1.0, 0.1]])
     np.testing.assert_allclose(results.get_times(time_units="s"), [0.0])
-    with pytest.raises(RuntimeError, match="TTDepletionAtoms"):
-        results.get_atoms("1", "U235")
-    with pytest.raises(RuntimeError, match="TTDepletionAtoms"):
-        results[0]["1", "U235"]
-    with h5py.File('depletion_results.h5', 'r') as handle:
-        with pytest.raises(RuntimeError, match="TTDepletionAtoms"):
-            StepResult.from_hdf5(handle, 0)
-    with pytest.raises(IndexError, match="out of bounds"):
-        reader.get_material_atom_vector(1, "1")
-    with pytest.raises(KeyError, match="Material"):
-        reader.get_material_atom_vector(0, "3")
-    with pytest.raises(KeyError, match="Nuclide"):
-        reader.get_atoms("1", "U238")
-
-
-def test_results_save_tt_atom_number_clips_significant_negative(run_in_tmpdir):
-    """TT atom-number writes clip negatives below the density threshold."""
-
-    op = MagicMock()
-    op._tt_depletion_used = True
-    op._tt_eps = 0.0
-    vol_dict = {"1": 2.0, "2": 4.0}
-    nuc_list = ["n1", "n2"]
-    burn_list = ["1", "2"]
-    name_list = {mat: "" for mat in burn_list}
-    op.get_results_info.return_value = (
-        vol_dict, nuc_list, burn_list, burn_list, name_list)
-    x = [
-        np.array([-3000.0, -1000.0]),
-        np.array([-3000.0, 1.0]),
-    ]
-    expected = np.array([
-        [0.0, -1000.0],
-        [-3000.0, 1.0],
-    ])
-    op_result = OperatorResult(
-        ufloat(1.0, 0.1), _TTReactionRates(3.0))
-
-    StepResult.save(
-        op, x, op_result, [0.0, 1.0], 1.0, 0, write_rates=False)
-
-    with h5py.File('depletion_results.h5', 'r') as handle:
-        assert 'number' not in handle
-        tt_group = handle[
-            'tt_depletion_atom_numbers/steps/0/blocks/0/atom_number']
-        atom_tt = TT.from_hdf5(tt_group)
-        np.testing.assert_allclose(
-            atom_tt._contract_slice(()), expected, atol=1.0e-12)
-
-    reader = TTDepletionAtoms('depletion_results.h5')
-    np.testing.assert_allclose(
-        reader.get_material_atom_vector(0, "1"), expected[0], atol=1.0e-12)
+    times, atoms = results.get_atoms("2", "Xe135")
+    np.testing.assert_allclose(times, [0.0])
+    np.testing.assert_allclose(atoms, [4.0])
+    material = results[0].get_material("2")
+    atom_densities = material.get_nuclide_atom_densities()
+    np.testing.assert_allclose(atom_densities["U235"], 0.75e-24)
+    np.testing.assert_allclose(atom_densities["Xe135"], 1.0e-24)
 
 
 def test_bad_integrator_inputs():
@@ -567,9 +482,7 @@ def test_predictor_tt_depletes_material_slices(monkeypatch):
     op.heavy_metal = 1.0
     op.local_mats = ['1', '2']
     op._tt_depletion_used = True
-    op.number = _tt_atom_densities(
-        op.local_mats, ['1', '2'], {'1': 1.0, '2': 1.0},
-        [[0.0, 0.0], [0.0, 0.0]])
+    n = [np.array([0.0, 0.0]), np.array([0.0, 0.0])]
     rate_calls = []
 
     def get_tt_reaction_rates(mat, normalization_factor):
@@ -585,18 +498,15 @@ def test_predictor_tt_depletes_material_slices(monkeypatch):
     integrator = PredictorIntegrator(op, [1], power=1, solver=solver)
 
     _, result = integrator(
-        None, Context(), 1.0, 1.0, 0)
+        n, Context(), 1.0, 1.0, 0)
 
     assert rate_calls == [('1', 5.0), ('2', 5.0)]
     assert chain.seen_yields == [{'mat': '1'}, {'mat': '2'}]
-    assert isinstance(result, TTAtomDensities)
-    np.testing.assert_allclose(
-        result.get_mat_atom_slice('1'), [1.0, 0.0], atol=1.0e-12)
-    np.testing.assert_allclose(
-        result.get_mat_atom_slice('2'), [3.0, 4.0], atol=1.0e-12)
+    np.testing.assert_allclose(result[0], [1.0, 0.0], atol=1.0e-12)
+    np.testing.assert_allclose(result[1], [3.0, 4.0], atol=1.0e-12)
 
 
-def test_predictor_tt_uses_tt_atom_densities(monkeypatch):
+def test_predictor_tt_uses_dense_atom_numbers(monkeypatch):
     class RateSlice(np.ndarray):
         def __new__(cls, values):
             obj = np.asarray(values).view(cls)
@@ -624,9 +534,7 @@ def test_predictor_tt_uses_tt_atom_densities(monkeypatch):
     op.heavy_metal = 1.0
     op.local_mats = ['1', '2']
     op._tt_depletion_used = True
-    op.number = _tt_atom_densities(
-        op.local_mats, ['1', '2'], {'1': 1.0, '2': 1.0},
-        [[10.0, 20.0], [30.0, 40.0]])
+    n = [np.array([10.0, 20.0]), np.array([30.0, 40.0])]
 
     def get_tt_reaction_rates(mat, normalization_factor):
         if mat == '1':
@@ -640,13 +548,10 @@ def test_predictor_tt_uses_tt_atom_densities(monkeypatch):
     integrator = PredictorIntegrator(op, [1], power=1, solver=solver)
 
     _, result = integrator(
-        None, Context(), 1.0, 1.0, 0)
+        n, Context(), 1.0, 1.0, 0)
 
-    assert isinstance(result, TTAtomDensities)
-    np.testing.assert_allclose(
-        result.get_mat_atom_slice('1'), [11.0, 22.0], atol=1.0e-12)
-    np.testing.assert_allclose(
-        result.get_mat_atom_slice('2'), [33.0, 44.0], atol=1.0e-12)
+    np.testing.assert_allclose(result[0], [11.0, 22.0], atol=1.0e-12)
+    np.testing.assert_allclose(result[1], [33.0, 44.0], atol=1.0e-12)
 
 
 def test_predictor_tt_zero_source_uses_zero_rates(monkeypatch):
@@ -672,9 +577,7 @@ def test_predictor_tt_zero_source_uses_zero_rates(monkeypatch):
     op.local_mats = ['1', '2']
     op.reaction_rates = ReactionRates(op.local_mats, ['1', '2'], ['rx'])
     op._tt_depletion_used = True
-    op.number = _tt_atom_densities(
-        op.local_mats, ['1', '2'], {'1': 1.0, '2': 1.0},
-        [[1.0, 2.0], [3.0, 4.0]])
+    n = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]
     monkeypatch.setattr(
         'openmc.deplete.tt_depletion._get_tt_reaction_rates',
         lambda *args: pytest.fail("TT rates should not be reconstructed"))
@@ -683,14 +586,29 @@ def test_predictor_tt_zero_source_uses_zero_rates(monkeypatch):
     rates = _TTReactionRates(0.0, zero_source=True)
 
     _, result = integrator(
-        None, rates, 1.0, 1.0, 0)
+        n, rates, 1.0, 1.0, 0)
 
     assert len(chain.matrices) == 2
-    assert isinstance(result, TTAtomDensities)
-    np.testing.assert_allclose(
-        result.get_mat_atom_slice('1'), [1.0, 2.0], atol=1.0e-12)
-    np.testing.assert_allclose(
-        result.get_mat_atom_slice('2'), [3.0, 4.0], atol=1.0e-12)
+    np.testing.assert_allclose(result[0], [1.0, 2.0], atol=1.0e-12)
+    np.testing.assert_allclose(result[1], [3.0, 4.0], atol=1.0e-12)
+
+
+def test_predictor_tt_requires_composition_per_local_mat():
+    class Context:
+        _tt_reaction_rates = True
+        normalization_factor = 1.0
+
+    op = MagicMock()
+    op.prev_res = None
+    op.chain = MagicMock()
+    op.heavy_metal = 1.0
+    op.local_mats = ['1', '2']
+    op._tt_depletion_used = True
+
+    integrator = PredictorIntegrator(op, [1], power=1)
+
+    with pytest.raises(ValueError, match="Number of compositions"):
+        integrator([np.array([1.0])], Context(), 1.0, 1.0, 0)
 
 
 def mock_good_solver(A, n, t, substeps=1):

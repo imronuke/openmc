@@ -658,14 +658,14 @@ class Integrator(ABC):
         self.operator = operator
         self.chain = operator.chain
 
-        # TT depletion only works with PredictorIntegrator.
+        # TT reaction-rate mode only works with PredictorIntegrator.
         tt_predictor = any(
             cls.__name__ == 'PredictorIntegrator' for cls in type(self).__mro__)
         if (getattr(operator, '_tt_depletion_used', False) is True and
                 not tt_predictor):
             raise ValueError(
-                "Tensor-train depletion is currently only supported with "
-                "PredictorIntegrator.")
+                "Tensor-train reaction-rate mode is currently only supported "
+                "with PredictorIntegrator.")
 
         # Determine source rate and normalize units to W in using power
         if power is not None:
@@ -948,7 +948,6 @@ class Integrator(ABC):
             .. versionadded:: 0.15.3
         """
         with change_directory(self.operator.output_dir):
-            tt_depletion_used = getattr(self.operator, '_tt_depletion_used', False)
             n = self.operator.initial_condition()
             t, self._i_res = self._get_start_data()
 
@@ -978,14 +977,7 @@ class Integrator(ABC):
                 )
 
                 # Update for next step
-                if tt_depletion_used:
-                    # In TT mode n_end is the end-of-step TTAtomDensities
-                    # object; StepResult.save above writes beginning-of-step
-                    # atom numbers before this replacement.
-                    self.operator.number = n_end
-                    n = None
-                else:
-                    n = n_end
+                n = n_end
                 t += dt
 
             # Final simulation -- in the case that final_step is False, a zero
@@ -997,12 +989,7 @@ class Integrator(ABC):
                     f"[openmc.deplete] t={_format_depletion_time(t)} "
                     "(final operator evaluation)")
             if self._keff_search_control is not None and source_rate != 0.0:
-                if tt_depletion_used:
-                    keff_input = list(
-                        self.operator.number.get_mat_atom_slice(np.s_[:]))
-                else:
-                    keff_input = n
-                keff_search_root = self._keff_search_control.run(keff_input)
+                keff_search_root = self._keff_search_control.run(n)
             else:
                 keff_search_root = None
             res_final = self.operator(n, source_rate if final_step else 0.0)
@@ -1058,7 +1045,7 @@ class Integrator(ABC):
         if getattr(self.operator, '_tt_depletion_used', False) is True:
             raise ValueError(
                 "Transfer rates are not supported when tensor-train "
-                "depletion is enabled.")
+                "reaction-rate mode is enabled.")
 
         if self.transfer_rates is None:
             if hasattr(self.operator, 'model'):

@@ -21,7 +21,8 @@ The current version of the depletion results file format is 1.3.
            - **reaction rates** (*double[][][][]*) -- Reaction rates at each
              timestep. This array has shape (number of timesteps, number of
              materials, number of nuclides, number of reactions). Only stored if
-             write_rates=True for non-tensor-train depletion.
+             ``write_rates=True`` and tensor-train reaction-rate storage is not
+             used.
            - **time** (*double[][2]*) -- Time in [s] at beginning/end of each
              step.
            - **source_rate** (*double[]*) -- Power in [W] or source rate in
