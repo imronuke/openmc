@@ -92,7 +92,8 @@ def run_depletion(model):
     chain_file = Path(__file__).with_name('chain_simple.xml')
     op = openmc.deplete.CoupledOperator(model, str(chain_file))
 
-    power = POWER_DENSITY * POWER_VOLUME
+    # POWER_DENSITY is MW/m3 and POWER_VOLUME is m3; depletion expects W.
+    power = POWER_DENSITY * POWER_VOLUME * 1.0e6
     integrator = openmc.deplete.PredictorIntegrator(
         op, BURNUP_STEPS, power, timestep_units='MWd/kg')
     integrator.integrate(write_rates=True)
