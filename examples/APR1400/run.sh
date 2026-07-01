@@ -16,9 +16,13 @@ assemblies=(
 
 cases=(
   CB
-  RR
+  RR_REFLECTOR
+  RR_RPV
+  RR_AIR
+  RR_DETECTOR
   BR
-  TR
+  TR_TOP_END
+  TR_REFLECTOR
 )
 
 mkdir -p logs

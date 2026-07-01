@@ -6,10 +6,23 @@ from constants import ASSEMBLY_PIN_MAPS
 from mgxs.fuel import build_cutback_case, build_fuel_case
 from mgxs.mgxs_constants import OUTPUT_ROOT
 from mgxs.non_fuel_assembly import (
-    build_bottom_reflector_case, build_radial_reflector_case,
-    build_top_reflector_case
+    build_air_case, build_bottom_reflector_case, build_detector_case,
+    build_radial_reflector_case, build_rpv_case,
+    build_top_end_case, build_top_reflector_case
 )
 from mgxs.utils import run_case
+
+
+CASE_BUILDERS = {
+    'CB': build_cutback_case,
+    'RR_REFLECTOR': build_radial_reflector_case,
+    'RR_RPV': build_rpv_case,
+    'RR_AIR': build_air_case,
+    'RR_DETECTOR': build_detector_case,
+    'BR': build_bottom_reflector_case,
+    'TR_TOP_END': build_top_end_case,
+    'TR_REFLECTOR': build_top_reflector_case,
+}
 
 
 def parse_args():
@@ -23,7 +36,7 @@ def parse_args():
         help='fuel assembly type to generate, for example A0')
     target.add_argument(
         '--case',
-        choices=('CB', 'RR', 'BR', 'TR'),
+        choices=tuple(CASE_BUILDERS),
         help='special non-fuel MGXS case to generate')
     args = parser.parse_args()
 
@@ -46,17 +59,12 @@ def main():
 
     if target_kind == 'assembly':
         case_spec = build_fuel_case(target_value)
-    elif target_value == 'CB':
-        case_spec = build_cutback_case()
-    elif target_value == 'RR':
-        case_spec = build_radial_reflector_case()
-    elif target_value == 'BR':
-        case_spec = build_bottom_reflector_case()
     else:
-        case_spec = build_top_reflector_case()
+        case_spec = CASE_BUILDERS[target_value]()
 
     print(f'Running OpenMC for {case_spec.case_name}', flush=True)
-    case_dir, _statepoint_path, exported_paths = run_case(case_spec, OUTPUT_ROOT)
+    case_dir, _statepoint_path, exported_paths = run_case(
+        case_spec, OUTPUT_ROOT)
     print(f'Generated {case_spec.case_name} MGXS files in {case_dir}', flush=True)
     for path in exported_paths:
         print(f'Generated MGXS library {path}', flush=True)

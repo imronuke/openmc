@@ -20,24 +20,7 @@ from .utils import OutputSpec, create_mgxs_library, create_settings, make_case
 def _outer_boundary():
     return openmc.model.RectangularPrism(
         ASSEMBLY_WIDTH, ASSEMBLY_WIDTH, boundary_type='reflective')
-
-
-def _radial_reflector_plots(bounds):
-    """Return plots for checking the radial reflector model."""
-
-    x_min, y_min, _z_min, x_max, y_max, _z_max = bounds
-    width = x_max - x_min
-    depth = y_max - y_min
-
-    xy_plot = openmc.SlicePlot(name='RR radial reflector xy')
-    xy_plot.basis = 'xy'
-    xy_plot.origin = (0.5 * (x_min + x_max), 0.5 * (y_min + y_max), 0.0)
-    xy_plot.width = (width, depth)
-    xy_plot.pixels = (1800, max(300, int(round(1800 * depth / width))))
-    xy_plot.color_by = 'material'
-
-    return openmc.Plots([xy_plot])
-
+    
 
 def build_radial_reflector_case():
     """Return the radial reflector MGXS case."""
@@ -53,21 +36,7 @@ def build_radial_reflector_case():
     x += BAFFLE
     x_baffle_out = openmc.XPlane(x0=x)
     x += ASSEMBLY_WIDTH - BAFFLE - BAFFLE_GAP
-    x_reflector_outer = openmc.XPlane(x0=x)
-    x += RR_RPV_THICKNESS
-    x_rpv_outer = openmc.XPlane(x0=x)
-    x += RR_AIR_THICKNESS
-    x_air_outer = openmc.XPlane(x0=x)
-    x += DET_WALL
-    x_det_left = openmc.XPlane(x0=x)
-    x += U_THICK
-    x_det_coat_left = openmc.XPlane(x0=x)
-    x += DET_INNER
-    x_det_inner = openmc.XPlane(x0=x)
-    x += U_THICK
-    x_det_coat_right = openmc.XPlane(x0=x)
-    x += DET_WALL
-    x_detector_outer = openmc.XPlane(x0=x, boundary_type='vacuum')
+    x_reflector_outer = openmc.XPlane(x0=x, boundary_type='vacuum')
     y_min = openmc.YPlane(y0=0.0, boundary_type='reflective')
     y_max = openmc.YPlane(
         y0=0.5 * ASSEMBLY_WIDTH, boundary_type='reflective')
@@ -101,13 +70,149 @@ def build_radial_reflector_case():
         fill=radial_reflector_universe,
         region=+x_fa_outer & -x_reflector_outer & base_region)
 
+    bounds = [
+        0.0,
+        0.0,
+        -0.5 * MODEL_HEIGHT,
+        x_reflector_outer.x0,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * MODEL_HEIGHT
+    ]
+    source_bounds = [
+        0.0,
+        0.0,
+        -0.5 * MODEL_HEIGHT,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * MODEL_HEIGHT
+    ]
+
+    geometry = openmc.Geometry([
+        fa_cell, radial_reflector_cell
+    ])
+    settings = create_settings(
+        bounds,
+        [PINS_PER_SIDE // 2, PINS_PER_SIDE // 2, 1],
+        source_bounds=source_bounds
+    )
+    library = create_mgxs_library(
+        geometry,
+        [
+            radial_reflector_universe
+        ],
+        'universe',
+        'RR non-fuel mgxs'
+    )
+    case = make_case(
+        'RR',
+        geometry,
+        settings,
+        library,
+        [
+            OutputSpec(
+                radial_reflector_universe, 'radial_reflector',
+                'radial_reflector'),
+        ]
+    )
+    
+    return case
+
+def build_rpv_case():
+    """Return the radial reflector MGXS case."""
+
+    materials = create_materials()
+    assembly = fuel_assembly_2d('A0', materials)
+
+    x_inner = openmc.XPlane(x0=0.0, boundary_type='reflective')
+    x = 0.5 * ASSEMBLY_WIDTH
+    x_fa_outer = openmc.XPlane(x0=x)
+    x += RR_RPV_THICKNESS
+    x_rpv_outer = openmc.XPlane(x0=x, boundary_type='vacuum')
+    y_min = openmc.YPlane(y0=0.0, boundary_type='reflective')
+    y_max = openmc.YPlane(
+        y0=0.5 * ASSEMBLY_WIDTH, boundary_type='reflective')
+    bottom = openmc.ZPlane(z0=-0.5 * MODEL_HEIGHT, boundary_type='reflective')
+    top = openmc.ZPlane(z0=0.5 * MODEL_HEIGHT, boundary_type='reflective')
+
+    base_region = +y_min & -y_max & +bottom & -top
+
+    fa_cell = openmc.Cell(
+        name='Quarter A0 fuel assembly',
+        fill=assembly,
+        region=+x_inner & -x_fa_outer & base_region)
+
     rpv_universe = openmc.Universe(cells=[
         openmc.Cell(name='RPV material', fill=materials.rpv)
     ])
     rpv_cell = openmc.Cell(
         name='RPV approximation',
         fill=rpv_universe,
-        region=+x_reflector_outer & -x_rpv_outer & base_region)
+        region=+x_fa_outer & -x_rpv_outer & base_region)
+
+    bounds = [
+        0.0,
+        0.0,
+        -0.5 * MODEL_HEIGHT,
+        x_rpv_outer.x0,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * MODEL_HEIGHT
+    ]
+    source_bounds = [
+        0.0,
+        0.0,
+        -0.5 * MODEL_HEIGHT,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * MODEL_HEIGHT
+    ]
+
+    geometry = openmc.Geometry([
+        fa_cell, rpv_cell
+    ])
+    settings = create_settings(
+        bounds,
+        [PINS_PER_SIDE // 2, PINS_PER_SIDE // 2, 1],
+        source_bounds=source_bounds
+    )
+    library = create_mgxs_library(
+        geometry,
+        [rpv_universe],
+        'universe',
+        'RR non-fuel mgxs'
+    )
+    case = make_case(
+        'RR',
+        geometry,
+        settings,
+        library,
+        [OutputSpec(rpv_universe, 'rpv', 'rpv')]
+    )
+    
+    return case
+
+def build_air_case():
+    """Return the radial reflector MGXS case."""
+
+    materials = create_materials()
+    assembly = fuel_assembly_2d('A0', materials)
+
+    x_inner = openmc.XPlane(x0=0.0, boundary_type='reflective')
+    x = 0.5 * ASSEMBLY_WIDTH
+    x_fa_outer = openmc.XPlane(x0=x)
+    x += RR_AIR_THICKNESS
+    x_air_outer = openmc.XPlane(x0=x, boundary_type='vacuum')
+    y_min = openmc.YPlane(y0=0.0, boundary_type='reflective')
+    y_max = openmc.YPlane(
+        y0=0.5 * ASSEMBLY_WIDTH, boundary_type='reflective')
+    bottom = openmc.ZPlane(z0=-0.5 * MODEL_HEIGHT, boundary_type='reflective')
+    top = openmc.ZPlane(z0=0.5 * MODEL_HEIGHT, boundary_type='reflective')
+
+    base_region = +y_min & -y_max & +bottom & -top
+
+    fa_cell = openmc.Cell(
+        name='Quarter A0 fuel assembly',
+        fill=assembly,
+        region=+x_inner & -x_fa_outer & base_region)
 
     air_universe = openmc.Universe(cells=[
         openmc.Cell(name='Air material', fill=materials.air)
@@ -115,12 +220,86 @@ def build_radial_reflector_case():
     air_cell = openmc.Cell(
         name='Air gap',
         fill=air_universe,
-        region=+x_rpv_outer & -x_air_outer & base_region)
+        region=+x_fa_outer & -x_air_outer & base_region)
+
+
+    bounds = [
+        0.0,
+        0.0,
+        -0.5 * MODEL_HEIGHT,
+        x_air_outer.x0,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * MODEL_HEIGHT
+    ]
+    source_bounds = [
+        0.0,
+        0.0,
+        -0.5 * MODEL_HEIGHT,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * MODEL_HEIGHT
+    ]
+
+    geometry = openmc.Geometry([
+        fa_cell, air_cell
+    ])
+    settings = create_settings(
+        bounds,
+        [PINS_PER_SIDE // 2, PINS_PER_SIDE // 2, 1],
+        source_bounds=source_bounds
+    )
+    library = create_mgxs_library(
+        geometry,
+        [air_universe],
+        'universe',
+        'RR non-fuel mgxs'
+    )
+    case = make_case(
+        'RR',
+        geometry,
+        settings,
+        library,
+        [OutputSpec(air_universe, 'air', 'air')]
+    )
+
+    return case
+
+def build_detector_case():
+    """Return the radial reflector MGXS case."""
+
+    materials = create_materials()
+    assembly = fuel_assembly_2d('A0', materials)
+
+    x_inner = openmc.XPlane(x0=0.0, boundary_type='reflective')
+    x = 0.5 * ASSEMBLY_WIDTH
+    x_fa_outer = openmc.XPlane(x0=x)
+    x += DET_WALL
+    x_det_left = openmc.XPlane(x0=x)
+    x += U_THICK
+    x_det_coat_left = openmc.XPlane(x0=x)
+    x += DET_INNER
+    x_det_inner = openmc.XPlane(x0=x)
+    x += U_THICK
+    x_det_coat_right = openmc.XPlane(x0=x)
+    x += DET_WALL
+    x_detector_outer = openmc.XPlane(x0=x, boundary_type='vacuum')
+    y_min = openmc.YPlane(y0=0.0, boundary_type='reflective')
+    y_max = openmc.YPlane(
+        y0=0.5 * ASSEMBLY_WIDTH, boundary_type='reflective')
+    bottom = openmc.ZPlane(z0=-0.5 * MODEL_HEIGHT, boundary_type='reflective')
+    top = openmc.ZPlane(z0=0.5 * MODEL_HEIGHT, boundary_type='reflective')
+
+    base_region = +y_min & -y_max & +bottom & -top
+
+    fa_cell = openmc.Cell(
+        name='Quarter A0 fuel assembly',
+        fill=assembly,
+        region=+x_inner & -x_fa_outer & base_region)
 
     det_wall_left = openmc.Cell(
         name='Detector left wall',
         fill=materials.ss304,
-        region=+x_air_outer & -x_det_left & base_region)
+        region=+x_fa_outer & -x_det_left & base_region)
     det_coat_left = openmc.Cell(
         name='Detector left coating',
         fill=materials.detector,
@@ -146,7 +325,7 @@ def build_radial_reflector_case():
     detector_cell = openmc.Cell(
         name='Detector domain',
         fill=detector_universe,
-        region=+x_air_outer & -x_detector_outer & base_region)
+        region=+x_fa_outer & -x_detector_outer & base_region)
 
     bounds = [
         0.0,
@@ -166,7 +345,7 @@ def build_radial_reflector_case():
     ]
 
     geometry = openmc.Geometry([
-        fa_cell, radial_reflector_cell, rpv_cell, air_cell, detector_cell
+        fa_cell, detector_cell
     ])
     settings = create_settings(
         bounds,
@@ -175,10 +354,7 @@ def build_radial_reflector_case():
     )
     library = create_mgxs_library(
         geometry,
-        [
-            radial_reflector_universe, rpv_universe, air_universe,
-            detector_universe
-        ],
+        [detector_universe],
         'universe',
         'RR non-fuel mgxs'
     )
@@ -188,17 +364,11 @@ def build_radial_reflector_case():
         settings,
         library,
         [
-            OutputSpec(
-                radial_reflector_universe, 'radial_reflector',
-                'radial_reflector'),
-            OutputSpec(rpv_universe, 'rpv', 'rpv'),
-            OutputSpec(air_universe, 'air', 'air'),
             OutputSpec(detector_universe, 'detector', 'detector'),
         ]
     )
-    case.model.plots = _radial_reflector_plots(bounds)
+    
     return case
-
 
 def build_bottom_reflector_case():
     """Return the bottom reflector MGXS case."""
@@ -271,7 +441,7 @@ def build_bottom_reflector_case():
     )
 
 
-def build_top_reflector_case():
+def build_top_end_case():
     """Return the top reflector MGXS case."""
 
     materials = create_materials()
@@ -280,9 +450,7 @@ def build_top_reflector_case():
     outer_boundary = _outer_boundary()
     model_bottom = openmc.ZPlane(z0=STACK_BOTTOM_Z, boundary_type='reflective')
     active_top = openmc.ZPlane(z0=ACTIVE_TOP_Z)
-    stack_top = openmc.ZPlane(z0=STACK_TOP_Z)
-    model_top = openmc.ZPlane(
-        z0=STACK_TOP_Z + TOP_REFLECTOR_HEIGHT, boundary_type='vacuum')
+    stack_top = openmc.ZPlane(z0=STACK_TOP_Z, boundary_type='vacuum')
 
     lower_assembly_cell = openmc.Cell(
         name='Lower A0 assembly',
@@ -292,10 +460,66 @@ def build_top_reflector_case():
         name='Top end region',
         fill=assembly,
         region=-outer_boundary & +active_top & -stack_top)
+
+    bounds = [
+        -0.5 * ASSEMBLY_WIDTH,
+        -0.5 * ASSEMBLY_WIDTH,
+        model_bottom.z0,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * ASSEMBLY_WIDTH,
+        stack_top.z0
+    ]
+    source_bounds = [
+        -0.5 * ASSEMBLY_WIDTH,
+        -0.5 * ASSEMBLY_WIDTH,
+        ACTIVE_BOTTOM_Z,
+        0.5 * ASSEMBLY_WIDTH,
+        0.5 * ASSEMBLY_WIDTH,
+        ACTIVE_TOP_Z
+    ]
+
+    geometry = openmc.Geometry([
+        lower_assembly_cell, top_end_cell
+    ])
+    settings = create_settings(
+        bounds,
+        [PINS_PER_SIDE, PINS_PER_SIDE, N_AXIAL],
+        source_bounds=source_bounds
+    )
+    library = create_mgxs_library(
+        geometry,
+        [top_end_cell],
+        'cell',
+        'TR non-fuel mgxs'
+    )
+    return make_case(
+        'TR',
+        geometry,
+        settings,
+        library,
+        [OutputSpec(top_end_cell, 'TR_top_end', 'top_end')]
+    )
+
+def build_top_reflector_case():
+    """Return the top reflector MGXS case."""
+
+    materials = create_materials()
+    assembly = fuel_assembly('A0', materials)
+
+    outer_boundary = _outer_boundary()
+    model_bottom = openmc.ZPlane(z0=STACK_BOTTOM_Z, boundary_type='reflective')
+    active_top = openmc.ZPlane(z0=ACTIVE_TOP_Z)
+    model_top = openmc.ZPlane(
+        z0=ACTIVE_TOP_Z + TOP_REFLECTOR_HEIGHT, boundary_type='vacuum')
+
+    lower_assembly_cell = openmc.Cell(
+        name='Lower A0 assembly',
+        fill=assembly,
+        region=-outer_boundary & +model_bottom & -active_top)
     top_reflector_cell = openmc.Cell(
         name='Top reflector',
         fill=materials.mod,
-        region=-outer_boundary & +stack_top & -model_top)
+        region=-outer_boundary & +active_top & -model_top)
 
     bounds = [
         -0.5 * ASSEMBLY_WIDTH,
@@ -315,7 +539,7 @@ def build_top_reflector_case():
     ]
 
     geometry = openmc.Geometry([
-        lower_assembly_cell, top_end_cell, top_reflector_cell
+        lower_assembly_cell, top_reflector_cell
     ])
     settings = create_settings(
         bounds,
@@ -324,7 +548,7 @@ def build_top_reflector_case():
     )
     library = create_mgxs_library(
         geometry,
-        [top_end_cell, top_reflector_cell],
+        [top_reflector_cell],
         'cell',
         'TR non-fuel mgxs'
     )
@@ -334,7 +558,6 @@ def build_top_reflector_case():
         settings,
         library,
         [
-            OutputSpec(top_end_cell, 'TR_top_end', 'top_end'),
             OutputSpec(top_reflector_cell, 'TR_reflector', 'top_reflector'),
         ]
     )

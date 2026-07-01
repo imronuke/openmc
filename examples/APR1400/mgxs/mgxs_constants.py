@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-BATCHES = 225
+BATCHES = 300
 INACTIVE = 25
 PARTICLES = 1000000
 MODEL_HEIGHT = 1.0
