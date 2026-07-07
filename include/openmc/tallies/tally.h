@@ -183,6 +183,9 @@ public:
   //! Relative TT truncation tolerance.
   double tt_eps_ {0.0};
 
+  //! Number of axial bins in the fastest-varying filter axis for TT storage.
+  int tt_n_axial_ {0};
+
   //! True if this tally should be written to statepoint files
   bool writable_ {true};
 

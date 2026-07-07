@@ -60,6 +60,8 @@ def _get_tt_depletion_rate_write_data(operator, rates):
     """Return TT depletion reaction-rate data for HDF5 output."""
     rate_helper = vars(operator).get('_rate_helper')
     tt_eps = None if rate_helper is None else vars(rate_helper).get('_tt_eps')
+    tt_n_axial = (
+        None if rate_helper is None else vars(rate_helper).get('_tt_n_axial'))
     reaction_rate_mask = getattr(rates, 'reaction_rate_mask', None)
     if reaction_rate_mask is None:
         reaction_rate_mask = vars(operator).get('_tt_reaction_rate_mask')
@@ -71,6 +73,7 @@ def _get_tt_depletion_rate_write_data(operator, rates):
         return {
             'zero_source': True,
             'tt_eps': tt_eps,
+            'tt_n_axial': tt_n_axial,
             'reaction_rate_mask': reaction_rate_mask,
             'normalization_factor': 0.0,
             'n_realizations': 0,
@@ -84,6 +87,7 @@ def _get_tt_depletion_rate_write_data(operator, rates):
     return {
         'zero_source': False,
         'tt_eps': tt_eps,
+        'tt_n_axial': tt_n_axial,
         'reaction_rate_mask': reaction_rate_mask,
         'normalization_factor': rates.normalization_factor,
         'n_realizations': n_realizations,
@@ -100,6 +104,8 @@ def _write_tt_depletion_rates(handle, step, data):
     group.attrs['normalization_mode'] = np.bytes_('fission-q')
     if data['tt_eps'] is not None:
         group.attrs['tt_eps'] = data['tt_eps']
+    if data['tt_n_axial'] is not None:
+        group.attrs['tt_n_axial'] = data['tt_n_axial']
     reaction_rate_mask = np.asarray(data['reaction_rate_mask'], dtype=bool)
     if 'reaction_rate_mask' in group:
         if not np.array_equal(group['reaction_rate_mask'][()], reaction_rate_mask):
@@ -149,6 +155,9 @@ class TTDepletionRates:
             self.tt_eps = tt_group.attrs.get('tt_eps')
             if self.tt_eps is not None:
                 self.tt_eps = float(self.tt_eps)
+            self.tt_n_axial = tt_group.attrs.get('tt_n_axial')
+            if self.tt_n_axial is not None:
+                self.tt_n_axial = int(self.tt_n_axial)
 
             self.index_mat = {}
             self.volume = {}

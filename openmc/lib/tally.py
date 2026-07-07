@@ -101,6 +101,9 @@ _dll.openmc_tally_set_scores.errcheck = _error_handler
 _dll.openmc_tally_set_tt_eps.argtypes = [c_int32, c_double]
 _dll.openmc_tally_set_tt_eps.restype = c_int
 _dll.openmc_tally_set_tt_eps.errcheck = _error_handler
+_dll.openmc_tally_set_tt_n_axial.argtypes = [c_int32, c_int32]
+_dll.openmc_tally_set_tt_n_axial.restype = c_int
+_dll.openmc_tally_set_tt_n_axial.errcheck = _error_handler
 _dll.openmc_tally_set_type.argtypes = [c_int32, c_char_p]
 _dll.openmc_tally_set_type.restype = c_int
 _dll.openmc_tally_set_type.errcheck = _error_handler
@@ -446,6 +449,9 @@ class Tally(_FortranObjectWithID):
 
     def set_tt_eps(self, eps):
         _dll.openmc_tally_set_tt_eps(self._index, eps)
+
+    def set_tt_n_axial(self, n_axial):
+        _dll.openmc_tally_set_tt_n_axial(self._index, n_axial)
 
     @property
     def scores(self):

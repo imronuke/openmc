@@ -694,6 +694,8 @@ void write_tallies()
         tally.n_realizations_);
       fmt::print(tallies_out, "  TT eps                        {}\n",
         tally.tt_eps_);
+      fmt::print(tallies_out, "  TT axial bins                 {}\n",
+        tally.tt_n_axial_);
       fmt::print(tallies_out, "  Dense accumulated storage     {} bytes\n",
         dense_bytes);
       fmt::print(tallies_out, "  TT accumulated storage        {} bytes\n",

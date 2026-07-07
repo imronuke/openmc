@@ -83,6 +83,9 @@ class Tally(IDManagerMixin):
     tt_eps : float, optional
         Relative tensor-train truncation tolerance. If specified, enables
         tensor-train tally accumulation for this tally.
+    tt_n_axial : int, optional
+        Number of axial bins in the fastest-varying filter axis. Required when
+        ``tt_eps`` is specified.
 
     Attributes
     ----------
@@ -154,6 +157,9 @@ class Tally(IDManagerMixin):
     tt_eps : float or None
         Relative tensor-train truncation tolerance. If None, tensor-train
         tally accumulation is disabled.
+    tt_n_axial : int or None
+        Number of axial bins in the fastest-varying filter axis for
+        tensor-train tally accumulation. Required when ``tt_eps`` is set.
 
     """
 
@@ -162,7 +168,7 @@ class Tally(IDManagerMixin):
 
     def __init__(self, tally_id=None, name='', scores=None, filters=None,
                  nuclides=None, estimator=None, triggers=None,
-                 derivative=None, tt_eps=None):
+                 derivative=None, tt_eps=None, tt_n_axial=None):
         # Initialize Tally class attributes
         self.id = tally_id
         self.name = name
@@ -174,6 +180,7 @@ class Tally(IDManagerMixin):
         self._derivative = None
         self._multiply_density = True
         self._tt_eps = None
+        self._tt_n_axial = None
 
         self._num_realizations = 0
         self._with_summary = False
@@ -213,6 +220,8 @@ class Tally(IDManagerMixin):
             self.derivative = derivative
         if tt_eps is not None:
             self.tt_eps = tt_eps
+        if tt_n_axial is not None:
+            self.tt_n_axial = tt_n_axial
 
     def __eq__(self, other):
         if other.id != self.id:
@@ -240,7 +249,7 @@ class Tally(IDManagerMixin):
         if other_nuclides != self_nuclides:
             return False
         for attr in {'scores', 'triggers', 'derivative', 'multiply_density',
-                     'tt_eps'}:
+                     'tt_eps', 'tt_n_axial'}:
             if getattr(other, attr) != getattr(self, attr):
                 return False
         return True
@@ -260,6 +269,8 @@ class Tally(IDManagerMixin):
         parts.append('{: <15}=\t{}'.format('Multiply dens.', self.multiply_density))
         if self.tt_eps is not None:
             parts.append('{: <15}=\t{}'.format('TT eps', self.tt_eps))
+        if self.tt_n_axial is not None:
+            parts.append('{: <15}=\t{}'.format('TT n axial', self.tt_n_axial))
         return '\n\t'.join(parts)
 
     @staticmethod
@@ -318,6 +329,17 @@ class Tally(IDManagerMixin):
         if value is not None:
             cv.check_greater_than('tt_eps', value, 0.0)
         self._tt_eps = value
+
+    @property
+    def tt_n_axial(self):
+        return self._tt_n_axial
+
+    @tt_n_axial.setter
+    def tt_n_axial(self, value):
+        cv.check_type('tt_n_axial', value, Integral, none_ok=True)
+        if value is not None:
+            cv.check_greater_than('tt_n_axial', value, 0)
+        self._tt_n_axial = value
 
     @property
     def uses_tt(self) -> bool:
@@ -1640,6 +1662,12 @@ class Tally(IDManagerMixin):
         if self.tt_eps is not None:
             subelement = ET.SubElement(element, "tt_eps")
             subelement.text = str(self.tt_eps)
+            if self.tt_n_axial is None:
+                raise ValueError(
+                    f'Unable to get XML for Tally ID="{self.id}" since '
+                    'tt_eps requires tt_n_axial')
+            subelement = ET.SubElement(element, "tt_n_axial")
+            subelement.text = str(self.tt_n_axial)
 
         return element
 
@@ -1736,6 +1764,10 @@ class Tally(IDManagerMixin):
         tt_eps = get_text(elem, "tt_eps")
         if tt_eps is not None:
             tally.tt_eps = float(tt_eps)
+            tt_n_axial = get_text(elem, "tt_n_axial")
+            if tt_n_axial is None:
+                raise ValueError("Tensor-train tally XML requires tt_n_axial.")
+            tally.tt_n_axial = int(tt_n_axial)
 
         return tally
 

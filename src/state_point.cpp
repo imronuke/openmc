@@ -78,6 +78,7 @@ void write_tally_tt_results(hid_t tally_group, const Tally& tally)
 {
   write_attribute(tally_group, "tt_enabled", 1);
   write_dataset(tally_group, "tt_eps", tally.tt_eps_);
+  write_dataset(tally_group, "tt_n_axial", tally.tt_n_axial_);
   write_dataset(tally_group, "tt_shape", tally.tt_shape_);
   write_tt(tally_group, "tt_sum", tally.tt_sum_);
   write_tt(tally_group, "tt_sum_sq", tally.tt_sum_sq_);
@@ -92,6 +93,9 @@ void read_tally_tt_results(hid_t tally_group, Tally& tally)
   }
   tally.use_tt_ = true;
   read_dataset(tally_group, "tt_eps", tally.tt_eps_);
+  if (object_exists(tally_group, "tt_n_axial")) {
+    read_dataset(tally_group, "tt_n_axial", tally.tt_n_axial_);
+  }
   read_dataset(tally_group, "tt_shape", tally.tt_shape_);
   tally.tt_sum_ = read_tt(tally_group, "tt_sum");
   tally.tt_sum_sq_ = read_tt(tally_group, "tt_sum_sq");

@@ -457,6 +457,8 @@ class StatePoint:
 
                     if 'tt_enabled' in group.attrs:
                         tally.tt_eps = float(group['tt_eps'][()])
+                        if 'tt_n_axial' in group:
+                            tally.tt_n_axial = int(group['tt_n_axial'][()])
                         tally._tt_shape = tuple(int(x) for x in group['tt_shape'][()])
                         tally._tt_ranks = {
                             'sum': _read_tt_ranks(group['tt_sum']),

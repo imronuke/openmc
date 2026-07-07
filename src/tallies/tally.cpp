@@ -116,6 +116,13 @@ Tally::Tally(pugi::xml_node node)
     if (tt_eps_ <= 0.0) {
       fatal_error("Tensor-train tally epsilon must be greater than zero.");
     }
+    if (!check_for_node(node, "tt_n_axial")) {
+      fatal_error("Tensor-train tally epsilon requires tt_n_axial.");
+    }
+    tt_n_axial_ = std::stoi(get_node_value(node, "tt_n_axial"));
+    if (tt_n_axial_ <= 0) {
+      fatal_error("Tensor-train tally axial dimension must be positive.");
+    }
     use_tt_ = true;
   }
   // =======================================================================
@@ -862,9 +869,20 @@ void Tally::init_results()
     results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
       static_cast<size_t>(n_scores), size_t {1}});
 
-    tt_shape_ = auto_tt_shape(n_filter_bins_);
-    auto score_shape = auto_tt_shape(n_scores);
-    tt_shape_.insert(tt_shape_.end(), score_shape.begin(), score_shape.end());
+    if (tt_n_axial_ <= 0) {
+      fatal_error(
+        "Tensor-train tally accumulation requires a positive axial dimension.");
+    }
+    if (n_filter_bins_ % tt_n_axial_ != 0) {
+      fatal_error(
+        "Tensor-train tally axial dimension must divide the filter bins.");
+    }
+
+    int n_instances = n_filter_bins_ / tt_n_axial_;
+    tt_shape_ = auto_tt_shape(n_instances);
+    tt_shape_.push_back(tt_n_axial_);
+    tt_shape_.push_back(static_cast<int>(nuclides_.size()));
+    tt_shape_.push_back(static_cast<int>(scores_.size()));
 
     int64_t tt_size = 1;
     for (int n : tt_shape_)
@@ -1626,6 +1644,22 @@ extern "C" int openmc_tally_set_tt_eps(int32_t index, double eps)
   auto& tally {model::tallies[index]};
   tally->use_tt_ = true;
   tally->tt_eps_ = eps;
+  return 0;
+}
+
+extern "C" int openmc_tally_set_tt_n_axial(int32_t index, int32_t n_axial)
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  if (n_axial <= 0) {
+    set_errmsg("Tensor-train tally axial dimension must be positive.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  model::tallies[index]->tt_n_axial_ = n_axial;
   return 0;
 }
 
