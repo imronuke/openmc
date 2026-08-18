@@ -111,17 +111,26 @@ Tally::Tally(pugi::xml_node node)
     higher_moments_ = get_node_value_bool(node, "higher_moments");
   }
 
-  if (check_for_node(node, "tt_eps")) {
+  bool has_tt_eps = check_for_node(node, "tt_eps");
+  bool has_tt_shape = check_for_node(node, "tt_shape");
+  if (has_tt_eps) {
     tt_eps_ = std::stod(get_node_value(node, "tt_eps"));
     if (tt_eps_ <= 0.0) {
       fatal_error("Tensor-train tally epsilon must be greater than zero.");
     }
-    if (!check_for_node(node, "tt_n_axial")) {
-      fatal_error("Tensor-train tally epsilon requires tt_n_axial.");
+    if (!has_tt_shape) {
+      fatal_error("Tensor-train tally epsilon requires tt_shape.");
     }
-    tt_n_axial_ = std::stoi(get_node_value(node, "tt_n_axial"));
-    if (tt_n_axial_ <= 0) {
-      fatal_error("Tensor-train tally axial dimension must be positive.");
+  }
+  if (has_tt_shape) {
+    tt_shape_ = get_node_array<int>(node, "tt_shape");
+    if (tt_shape_.empty()) {
+      fatal_error("Tensor-train tally shape cannot be empty.");
+    }
+    for (int n : tt_shape_) {
+      if (n <= 0) {
+        fatal_error("Tensor-train tally shape dimensions must be positive.");
+      }
     }
     use_tt_ = true;
   }
@@ -869,24 +878,17 @@ void Tally::init_results()
     results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
       static_cast<size_t>(n_scores), size_t {1}});
 
-    if (tt_n_axial_ <= 0) {
-      fatal_error(
-        "Tensor-train tally accumulation requires a positive axial dimension.");
+    if (tt_shape_.empty()) {
+      fatal_error("Tensor-train tally accumulation requires tt_shape.");
     }
-    if (n_filter_bins_ % tt_n_axial_ != 0) {
-      fatal_error(
-        "Tensor-train tally axial dimension must divide the filter bins.");
-    }
-
-    int n_instances = n_filter_bins_ / tt_n_axial_;
-    tt_shape_ = auto_tt_shape(n_instances);
-    tt_shape_.push_back(tt_n_axial_);
-    tt_shape_.push_back(static_cast<int>(nuclides_.size()));
-    tt_shape_.push_back(static_cast<int>(scores_.size()));
 
     int64_t tt_size = 1;
-    for (int n : tt_shape_)
+    for (int n : tt_shape_) {
+      if (n <= 0) {
+        fatal_error("Tensor-train tally shape dimensions must be positive.");
+      }
       tt_size *= n;
+    }
     if (tt_size != static_cast<int64_t>(n_filter_bins_) * n_scores) {
       fatal_error("Tensor-train tally shape does not match dense tally size.");
     }
@@ -1642,24 +1644,39 @@ extern "C" int openmc_tally_set_tt_eps(int32_t index, double eps)
   }
 
   auto& tally {model::tallies[index]};
-  tally->use_tt_ = true;
   tally->tt_eps_ = eps;
   return 0;
 }
 
-extern "C" int openmc_tally_set_tt_n_axial(int32_t index, int32_t n_axial)
+extern "C" int openmc_tally_set_tt_shape(
+  int32_t index, int n, const int32_t* shape)
 {
   if (index < 0 || index >= model::tallies.size()) {
     set_errmsg("Index in tallies array is out of bounds.");
     return OPENMC_E_OUT_OF_BOUNDS;
   }
 
-  if (n_axial <= 0) {
-    set_errmsg("Tensor-train tally axial dimension must be positive.");
+  if (n <= 0) {
+    set_errmsg("Tensor-train tally shape cannot be empty.");
     return OPENMC_E_INVALID_ARGUMENT;
   }
 
-  model::tallies[index]->tt_n_axial_ = n_axial;
+  if (!shape) {
+    set_errmsg("Tensor-train tally shape pointer is null.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  auto& tally {model::tallies[index]};
+  tally->tt_shape_.clear();
+  tally->tt_shape_.reserve(n);
+  for (int i = 0; i < n; ++i) {
+    if (shape[i] <= 0) {
+      set_errmsg("Tensor-train tally shape dimensions must be positive.");
+      return OPENMC_E_INVALID_ARGUMENT;
+    }
+    tally->tt_shape_.push_back(shape[i]);
+  }
+  tally->use_tt_ = true;
   return 0;
 }
 

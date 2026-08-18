@@ -201,7 +201,9 @@ def test_transfer(run_in_tmpdir, model):
 
 
 def test_tt_depletion_disallows_transfer_rates(model):
-    op = CoupledOperator(model, CHAIN_PATH, tt_eps=1e-3)
+    op = CoupledOperator(
+        model, CHAIN_PATH,
+        tt_opts={'tt_filter_shape': (1,), 'tt_eps': 1e-3})
     integrator = openmc.deplete.PredictorIntegrator(
         op, [1], 0.0, timestep_units='d')
 

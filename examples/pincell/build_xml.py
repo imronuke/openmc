@@ -93,7 +93,8 @@ mesh.upper_right = (pitch/2, pitch/2)
 mesh_filter = openmc.MeshFilter(mesh)
 
 # Now use the mesh filter in a tally and indicate what scores are desired
-mesh_tally = openmc.Tally(name="Mesh tally", tt_eps=1.e-8)
+mesh_tally = openmc.Tally(name="Mesh tally", tt_eps=1.e-8,
+                          tt_shape=(*mesh.dimension, 3))
 mesh_tally.filters = [mesh_filter]
 mesh_tally.scores = ['flux', 'fission', 'nu-fission']
 
@@ -104,7 +105,8 @@ groups = 500
 energies = np.logspace(log10(e_min), log10(e_max), groups + 1)
 energy_filter = openmc.EnergyFilter(energies)
 
-spectrum_tally = openmc.Tally(name="Flux spectrum", tt_eps=1.e-8)
+spectrum_tally = openmc.Tally(
+    name="Flux spectrum", tt_eps=1.e-8, tt_shape=(groups,))
 spectrum_tally.filters = [energy_filter]
 spectrum_tally.scores = ['flux']
 

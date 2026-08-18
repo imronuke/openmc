@@ -184,6 +184,7 @@ def test_results_save_tt_rates(run_in_tmpdir):
     tally.tt_sum = TT(cores)
     op._rate_helper = MagicMock()
     op._rate_helper._tt_eps = 1.0e-20
+    op._rate_helper._tt_shape = (2, 3, 4)
     op._rate_helper._rate_tally = tally
 
     x = [np.array([1.0, 2.0])]
@@ -250,14 +251,14 @@ def test_tt_depletion_rates_reader(run_in_tmpdir):
         burn_list, ["U235"], ["fission", "capture"])
 
     cores = [
-        np.array([[[10.0]]]),
-        np.array([[[7.0], [11.0]]]),
+        np.array([[[70.0], [110.0]]]),
     ]
     tally = MagicMock()
     tally.num_realizations = 5
     tally.tt_sum = TT(cores)
     op._rate_helper = MagicMock()
     op._rate_helper._tt_eps = 1.0e-12
+    op._rate_helper._tt_shape = (2,)
     op._rate_helper._rate_tally = tally
 
     x = [np.array([1.0])]
@@ -307,6 +308,7 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
     op.reaction_rates = ReactionRates(burn_list, nuc_list, ["fission"])
     op._rate_helper = MagicMock()
     op._rate_helper._tt_eps = 1.0e-30
+    op._rate_helper._tt_shape = (1,)
 
     x = [np.array([1.0])]
     reaction_rate_mask = np.array([[True]])
@@ -328,7 +330,7 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
         assert step.attrs['zero_source']
         assert step['normalization_factor'][()] == 0.0
         assert step['n_realizations'][()] == 0
-        assert step['tt_shape'].shape == (0,)
+        np.testing.assert_array_equal(step['tt_shape'][()], [1])
         assert 'tt_mean' not in step
 
     reader = TTDepletionRates('depletion_results.h5')

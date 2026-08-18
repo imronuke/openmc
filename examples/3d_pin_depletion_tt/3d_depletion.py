@@ -126,7 +126,12 @@ settings.entropy_mesh = entropy_mesh
 model = openmc.Model(geometry=geometry, settings=settings)
 
 chain_file = 'chain_simple.xml'
-op = openmc.deplete.CoupledOperator(model, chain_file, tt_eps=0.01)
+op = openmc.deplete.CoupledOperator(
+    model, chain_file,
+    tt_opts={
+        'tt_filter_shape': (n_radial, n_axial),
+        'tt_eps': 0.01,
+    })
 
 burnup_steps = [0.04]  # MWd/kgHM
 linear_power = 174.0  # W/cm

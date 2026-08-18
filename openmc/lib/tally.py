@@ -101,9 +101,10 @@ _dll.openmc_tally_set_scores.errcheck = _error_handler
 _dll.openmc_tally_set_tt_eps.argtypes = [c_int32, c_double]
 _dll.openmc_tally_set_tt_eps.restype = c_int
 _dll.openmc_tally_set_tt_eps.errcheck = _error_handler
-_dll.openmc_tally_set_tt_n_axial.argtypes = [c_int32, c_int32]
-_dll.openmc_tally_set_tt_n_axial.restype = c_int
-_dll.openmc_tally_set_tt_n_axial.errcheck = _error_handler
+_dll.openmc_tally_set_tt_shape.argtypes = [
+    c_int32, c_int, POINTER(c_int32)]
+_dll.openmc_tally_set_tt_shape.restype = c_int
+_dll.openmc_tally_set_tt_shape.errcheck = _error_handler
 _dll.openmc_tally_set_type.argtypes = [c_int32, c_char_p]
 _dll.openmc_tally_set_type.restype = c_int
 _dll.openmc_tally_set_type.errcheck = _error_handler
@@ -419,6 +420,8 @@ class Tally(_FortranObjectWithID):
 
     @staticmethod
     def _tt_filter_split(tt_shape, score_size):
+        if score_size == 1:
+            return len(tt_shape)
         product = 1
         for i in range(len(tt_shape) - 1, -1, -1):
             product *= tt_shape[i]
@@ -450,8 +453,10 @@ class Tally(_FortranObjectWithID):
     def set_tt_eps(self, eps):
         _dll.openmc_tally_set_tt_eps(self._index, eps)
 
-    def set_tt_n_axial(self, n_axial):
-        _dll.openmc_tally_set_tt_n_axial(self._index, n_axial)
+    def set_tt_shape(self, shape):
+        shape = np.asarray(shape, dtype=np.int32)
+        _dll.openmc_tally_set_tt_shape(
+            self._index, len(shape), shape.ctypes.data_as(POINTER(c_int32)))
 
     @property
     def scores(self):

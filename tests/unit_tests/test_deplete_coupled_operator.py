@@ -195,10 +195,19 @@ def test_tt_material_rate_helpers():
 def test_tt_operator_keeps_dense_atom_number(model):
     """CoupledOperator keeps dense AtomNumber when TT rates are enabled."""
 
-    op = CoupledOperator(model, CHAIN_PATH, tt_eps=1.0e-3)
+    op = CoupledOperator(
+        model, CHAIN_PATH,
+        tt_opts={'tt_filter_shape': (1,), 'tt_eps': 1.0e-3})
 
     assert isinstance(op.number, AtomNumber)
     assert not hasattr(op, 'tt_number')
+
+
+def test_tt_operator_requires_filter_shape(model):
+    """TT reaction-rate mode requires explicit filter-shape metadata."""
+
+    with pytest.raises(ValueError, match="tt_filter_shape"):
+        CoupledOperator(model, CHAIN_PATH, tt_opts={'tt_eps': 1.0e-3})
 
 
 @pytest.mark.parametrize("fission_yield_mode", ["constant", "cutoff", "average"])
@@ -206,8 +215,9 @@ def test_tt_operator_allows_fission_yield_modes(model, fission_yield_mode):
     """TT reaction-rate mode works with all fission-yield helper modes."""
 
     op = CoupledOperator(
-        model, CHAIN_PATH, tt_eps=1.0e-3,
-        fission_yield_mode=fission_yield_mode)
+        model, CHAIN_PATH,
+        fission_yield_mode=fission_yield_mode,
+        tt_opts={'tt_filter_shape': (1,), 'tt_eps': 1.0e-3})
 
     assert isinstance(op.number, AtomNumber)
 

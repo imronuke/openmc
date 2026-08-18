@@ -81,11 +81,11 @@ class Tally(IDManagerMixin):
     derivative : openmc.TallyDerivative, optional
         A material perturbation derivative to apply to all scores in the tally
     tt_eps : float, optional
-        Relative tensor-train truncation tolerance. If specified, enables
-        tensor-train tally accumulation for this tally.
-    tt_n_axial : int, optional
-        Number of axial bins in the fastest-varying filter axis. Required when
-        ``tt_eps`` is specified.
+        Relative tensor-train truncation tolerance. If specified, ``tt_shape``
+        must also be specified.
+    tt_shape : iterable of int, optional
+        Logical tensor shape used for tensor-train tally accumulation. If
+        specified, enables tensor-train tally accumulation for this tally.
 
     Attributes
     ----------
@@ -155,11 +155,9 @@ class Tally(IDManagerMixin):
     derivative : openmc.TallyDerivative
         A material perturbation derivative to apply to all scores in the tally.
     tt_eps : float or None
-        Relative tensor-train truncation tolerance. If None, tensor-train
-        tally accumulation is disabled.
-    tt_n_axial : int or None
-        Number of axial bins in the fastest-varying filter axis for
-        tensor-train tally accumulation. Required when ``tt_eps`` is set.
+        Relative tensor-train truncation tolerance.
+    tt_shape : tuple of int or None
+        Logical tensor shape used for tensor-train tally accumulation.
 
     """
 
@@ -168,7 +166,7 @@ class Tally(IDManagerMixin):
 
     def __init__(self, tally_id=None, name='', scores=None, filters=None,
                  nuclides=None, estimator=None, triggers=None,
-                 derivative=None, tt_eps=None, tt_n_axial=None):
+                 derivative=None, tt_eps=None, tt_shape=None):
         # Initialize Tally class attributes
         self.id = tally_id
         self.name = name
@@ -180,7 +178,6 @@ class Tally(IDManagerMixin):
         self._derivative = None
         self._multiply_density = True
         self._tt_eps = None
-        self._tt_n_axial = None
 
         self._num_realizations = 0
         self._with_summary = False
@@ -220,8 +217,8 @@ class Tally(IDManagerMixin):
             self.derivative = derivative
         if tt_eps is not None:
             self.tt_eps = tt_eps
-        if tt_n_axial is not None:
-            self.tt_n_axial = tt_n_axial
+        if tt_shape is not None:
+            self.tt_shape = tt_shape
 
     def __eq__(self, other):
         if other.id != self.id:
@@ -249,7 +246,7 @@ class Tally(IDManagerMixin):
         if other_nuclides != self_nuclides:
             return False
         for attr in {'scores', 'triggers', 'derivative', 'multiply_density',
-                     'tt_eps', 'tt_n_axial'}:
+                     'tt_eps', 'tt_shape'}:
             if getattr(other, attr) != getattr(self, attr):
                 return False
         return True
@@ -269,8 +266,8 @@ class Tally(IDManagerMixin):
         parts.append('{: <15}=\t{}'.format('Multiply dens.', self.multiply_density))
         if self.tt_eps is not None:
             parts.append('{: <15}=\t{}'.format('TT eps', self.tt_eps))
-        if self.tt_n_axial is not None:
-            parts.append('{: <15}=\t{}'.format('TT n axial', self.tt_n_axial))
+        if self.tt_shape is not None:
+            parts.append('{: <15}=\t{}'.format('TT shape', self.tt_shape))
         return '\n\t'.join(parts)
 
     @staticmethod
@@ -331,23 +328,26 @@ class Tally(IDManagerMixin):
         self._tt_eps = value
 
     @property
-    def tt_n_axial(self):
-        return self._tt_n_axial
-
-    @tt_n_axial.setter
-    def tt_n_axial(self, value):
-        cv.check_type('tt_n_axial', value, Integral, none_ok=True)
-        if value is not None:
-            cv.check_greater_than('tt_n_axial', value, 0)
-        self._tt_n_axial = value
-
-    @property
     def uses_tt(self) -> bool:
         return self._tt_shape is not None
 
     @property
     def tt_shape(self):
         return self._tt_shape
+
+    @tt_shape.setter
+    def tt_shape(self, value):
+        cv.check_type('tt_shape', value, Iterable, none_ok=True)
+        if value is None:
+            self._tt_shape = None
+            return
+        shape = tuple(value)
+        if not shape:
+            raise ValueError('tt_shape cannot be empty')
+        for dim in shape:
+            cv.check_type('tt_shape dimension', dim, Integral)
+            cv.check_greater_than('tt_shape dimension', dim, 0)
+        self._tt_shape = tuple(int(dim) for dim in shape)
 
     @property
     def tt_ranks(self):
@@ -1659,15 +1659,17 @@ class Tally(IDManagerMixin):
             subelement = ET.SubElement(element, "higher_moments")
             subelement.text = str(self.higher_moments).lower()
 
+        if self.tt_shape is not None:
+            subelement = ET.SubElement(element, "tt_shape")
+            subelement.text = ' '.join(str(n) for n in self.tt_shape)
+        elif self.tt_eps is not None:
+            raise ValueError(
+                f'Unable to get XML for Tally ID="{self.id}" since '
+                'tt_eps requires tt_shape')
+
         if self.tt_eps is not None:
             subelement = ET.SubElement(element, "tt_eps")
             subelement.text = str(self.tt_eps)
-            if self.tt_n_axial is None:
-                raise ValueError(
-                    f'Unable to get XML for Tally ID="{self.id}" since '
-                    'tt_eps requires tt_n_axial')
-            subelement = ET.SubElement(element, "tt_n_axial")
-            subelement.text = str(self.tt_n_axial)
 
         return element
 
@@ -1761,13 +1763,15 @@ class Tally(IDManagerMixin):
             deriv_id = int(deriv)
             tally.derivative = kwargs['derivatives'][deriv_id]
 
+        tt_shape = get_elem_list(elem, "tt_shape", int)
+        if tt_shape is not None:
+            tally.tt_shape = tt_shape
+
         tt_eps = get_text(elem, "tt_eps")
         if tt_eps is not None:
+            if tt_shape is None:
+                raise ValueError("Tensor-train tally XML requires tt_shape.")
             tally.tt_eps = float(tt_eps)
-            tt_n_axial = get_text(elem, "tt_n_axial")
-            if tt_n_axial is None:
-                raise ValueError("Tensor-train tally XML requires tt_n_axial.")
-            tally.tt_n_axial = int(tt_n_axial)
 
         return tally
 

@@ -4,6 +4,7 @@ Classes for collecting and calculating quantities for reaction rate operators
 import bisect
 from abc import abstractmethod
 from collections import defaultdict
+from collections.abc import Iterable
 from copy import deepcopy
 from itertools import product
 from numbers import Integral, Real
@@ -145,16 +146,18 @@ class DirectReactionRateHelper(ReactionRateHelper):
     nuclides : list of str
         All nuclides with desired reaction rates.
     """
-    def __init__(self, n_nuc, n_react, tt_eps=None, tt_n_axial=None):
+    def __init__(self, n_nuc, n_react, tt_shape=None, tt_eps=None):
         super().__init__(n_nuc, n_react)
         self._rate_tally = None
+        self._tt_shape = tt_shape
         self._tt_eps = tt_eps
-        self._tt_n_axial = tt_n_axial
-        if tt_n_axial is not None:
-            check_type("reaction_rate_opts['tt_n_axial']",
-                       tt_n_axial, Integral)
-            check_greater_than("reaction_rate_opts['tt_n_axial']",
-                               tt_n_axial, 0)
+        if tt_shape is not None:
+            check_type('tt_shape', tt_shape, Iterable)
+            self._tt_shape = tuple(tt_shape)
+            for n in self._tt_shape:
+                check_type('tt_shape dimension', n, Integral)
+                check_greater_than('tt_shape dimension', n, 0)
+            self._tt_shape = tuple(int(n) for n in self._tt_shape)
 
         # Automatically pre-calculate reaction rates for depletion
         openmc.lib.settings.need_depletion_rx = True
@@ -184,13 +187,19 @@ class DirectReactionRateHelper(ReactionRateHelper):
         self._rate_tally.scores = scores
         self._rate_tally.filters = [MaterialFilter(materials)]
         self._rate_tally.multiply_density = False
-        if self._tt_eps is not None:
-            if self._tt_n_axial is None:
+        if self._tt_shape is not None:
+            tt_size = 1
+            score_size = (
+                self._results_cache.shape[0] * self._results_cache.shape[1])
+            for n in self._tt_shape:
+                tt_size *= n
+            if tt_size != len(materials) * score_size:
                 raise ValueError(
-                    "Tensor-train reaction-rate mode requires "
-                    "reaction_rate_opts['tt_n_axial'].")
-            self._rate_tally.set_tt_eps(self._tt_eps)
-            self._rate_tally.set_tt_n_axial(self._tt_n_axial)
+                    "Tensor-train tally shape does not match depletion "
+                    "material, nuclide, and reaction dimensions.")
+            self._rate_tally.set_tt_shape(self._tt_shape)
+            if self._tt_eps is not None:
+                self._rate_tally.set_tt_eps(self._tt_eps)
         self._rate_tally_means_cache = None
 
     @property

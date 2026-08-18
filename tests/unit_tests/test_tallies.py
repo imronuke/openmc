@@ -23,6 +23,7 @@ def test_xml_roundtrip(run_in_tmpdir):
     tally.triggers = [openmc.Trigger('rel_err', 0.025)]
     tally.triggers[0].scores = ['total', 'fission']
     tally.tt_eps = 1.0e-8
+    tally.tt_shape = (125, 125, 3, 3)
     tallies = openmc.Tallies([tally])
 
     # Roundtrip through XML and make sure we get what we started with
@@ -47,6 +48,7 @@ def test_xml_roundtrip(run_in_tmpdir):
     assert new_tally.triggers[0].scores == tally.triggers[0].scores
     assert new_tally.multiply_density == tally.multiply_density
     assert new_tally.tt_eps == tally.tt_eps
+    assert new_tally.tt_shape == tally.tt_shape
 
 
 def test_tally_equivalence():
@@ -94,6 +96,10 @@ def test_tally_equivalence():
     tally_a.tt_eps = 1.0e-8
     assert tally_a != tally_b
     tally_b.tt_eps = 1.0e-8
+    assert tally_a == tally_b
+    tally_a.tt_shape = (4, 4)
+    assert tally_a != tally_b
+    tally_b.tt_shape = (4, 4)
     assert tally_a == tally_b
 
     trigger_a = openmc.Trigger('rel_err', 0.025)

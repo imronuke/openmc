@@ -694,8 +694,14 @@ void write_tallies()
         tally.n_realizations_);
       fmt::print(tallies_out, "  TT eps                        {}\n",
         tally.tt_eps_);
-      fmt::print(tallies_out, "  TT axial bins                 {}\n",
-        tally.tt_n_axial_);
+      std::ostringstream tt_shape;
+      for (std::size_t i = 0; i < tally.tt_shape_.size(); ++i) {
+        if (i > 0)
+          tt_shape << ' ';
+        tt_shape << tally.tt_shape_[i];
+      }
+      fmt::print(tallies_out, "  TT shape                      {}\n",
+        tt_shape.str());
       fmt::print(tallies_out, "  Dense accumulated storage     {} bytes\n",
         dense_bytes);
       fmt::print(tallies_out, "  TT accumulated storage        {} bytes\n",
