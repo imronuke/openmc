@@ -3,9 +3,8 @@
 import openmc
 
 from constants import (
-    ASSEMBLY_PIN_MAPS, GD_N_RADIAL, LATTICE_WIDTH, N_RADIAL,
-    PIN_MAP_FUEL_MATERIALS, PIN_PITCH, PINS_PER_SIDE, TUBE_CLAD_OR,
-    TUBE_MOD_OR
+    ASSEMBLY_PIN_MAPS, LATTICE_WIDTH, N_RADIAL, PIN_MAP_FUEL_MATERIALS,
+    PIN_PITCH, PINS_PER_SIDE, TUBE_CLAD_OR, TUBE_MOD_OR
 )
 from materials import create_materials
 from pins import fuel_pin_universe, tube_quadrants
@@ -69,12 +68,11 @@ def fuel_assembly(assembly_type='A0', materials=None):
         fuel_material_name = PIN_MAP_FUEL_MATERIALS[pin_code]
         # Only 1.71 wt% fuel has no axial fuel cutbacks.
         cutback_material = None if pin_code == 0 else materials.uo2_200
-        n_radial = GD_N_RADIAL if pin_code == 4 else N_RADIAL
         return fuel_pin_universe(
             materials,
             fuel_material=getattr(materials, fuel_material_name),
             cutback_material=cutback_material,
-            n_radial=n_radial)
+            n_radial=N_RADIAL)
 
     assembly_lattice.universes = [
         [

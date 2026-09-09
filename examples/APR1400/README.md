@@ -42,8 +42,8 @@ To run the one-step predictor depletion calculation:
 python build_xml.py --run=depletion
 ```
 
-The depletion operator uses `chain_simple.xml` from this directory. The default
-power is computed as:
+The depletion operator uses `xsec/chain_endfb71_pwr.xml` from the repository
+root. The default power is computed as:
 
 ```python
 POWER_DENSITY * POWER_VOLUME
@@ -65,11 +65,10 @@ The main source files are:
 - `core.py`: top-level core lattice and axial reflector regions.
 - `build_xml.py`: XML export, plot setup, settings, and depletion driver.
 
-The active fuel height is defined by `ACTIVE_AXIAL_HEIGHTS`. Normal fuel pins
-use `N_RADIAL` equal-area radial fuel zones, while gadolinium fuel pins use
-`GD_N_RADIAL` zones. Each fuel radial and axial depletion zone receives an
-independent cloned material with a volume assigned from its ring area and axial
-height.
+The active fuel height is defined by `ACTIVE_AXIAL_HEIGHTS`. All fuel pins use
+`N_RADIAL` equal-area radial fuel zones. Each fuel radial and axial depletion
+zone receives an independent cloned material with a volume assigned from its
+ring area and axial height.
 
 Fuel pin and tube universes are intentionally unbounded in the axial
 direction. The parent core geometry trims the assembly lattice between

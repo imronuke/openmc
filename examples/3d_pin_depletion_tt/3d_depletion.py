@@ -103,7 +103,7 @@ geometry = openmc.Geometry([*fuel_cells, gap, clad, water])
 settings = openmc.Settings()
 settings.batches = 150
 settings.inactive = 20
-settings.particles = 10000
+settings.particles = 5000
 
 bounds = [
     -fuel_rad, -fuel_rad, -0.5 * fuel_length,
@@ -130,7 +130,7 @@ op = openmc.deplete.CoupledOperator(
     model, chain_file,
     tt_opts={
         'tt_filter_shape': (n_radial, n_axial),
-        'tt_eps': 0.01,
+        'tt_eps': 1.0e-2,
     })
 
 burnup_steps = [0.04]  # MWd/kgHM

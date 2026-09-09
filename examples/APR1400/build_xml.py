@@ -85,18 +85,17 @@ def create_model():
 
 
 def run_depletion(model):
-    """Run a one-step predictor depletion calculation."""
+    """Run a predictor depletion calculation."""
 
     import openmc.deplete
 
-    chain_file = Path(__file__).with_name('chain_simple.xml')
-    op = openmc.deplete.CoupledOperator(model, str(chain_file))
+    op = openmc.deplete.CoupledOperator(model, "chain_simple.xml")
 
     # POWER_DENSITY is MW/m3 and POWER_VOLUME is m3; depletion expects W.
     power = POWER_DENSITY * POWER_VOLUME * 1.0e6
     integrator = openmc.deplete.PredictorIntegrator(
         op, BURNUP_STEPS, power, timestep_units='MWd/kg')
-    integrator.integrate(write_rates=True)
+    integrator.integrate(write_rates=False)
 
 
 def run_normal(model):

@@ -103,7 +103,7 @@ geometry = openmc.Geometry([*fuel_cells, gap, clad, water])
 settings = openmc.Settings()
 settings.batches = 150
 settings.inactive = 20
-settings.particles = 50000
+settings.particles = 5000
 
 bounds = [
     -fuel_rad, -fuel_rad, -0.5 * fuel_length,
