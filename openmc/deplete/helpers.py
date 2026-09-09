@@ -198,6 +198,7 @@ class DirectReactionRateHelper(ReactionRateHelper):
                     "Tensor-train tally shape does not match depletion "
                     "material, nuclide, and reaction dimensions.")
             self._rate_tally.set_tt_shape(self._tt_shape)
+            self._rate_tally._set_tt_channel_scaling()
             if self._tt_eps is not None:
                 self._rate_tally.set_tt_eps(self._tt_eps)
         self._rate_tally_means_cache = None

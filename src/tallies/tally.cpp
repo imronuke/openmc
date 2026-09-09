@@ -41,6 +41,7 @@
 
 #include <algorithm> // for max, set_union
 #include <cassert>
+#include <cmath>
 #include <cstddef>  // for size_t
 #include <iterator> // for back_inserter
 #include <optional>
@@ -892,6 +893,16 @@ void Tally::init_results()
     if (tt_size != static_cast<int64_t>(n_filter_bins_) * n_scores) {
       fatal_error("Tensor-train tally shape does not match dense tally size.");
     }
+    if (tt_channel_scaling_) {
+      if (tt_shape_.size() < 2 ||
+          tt_shape_[tt_shape_.size() - 2] !=
+            static_cast<int>(nuclides_.size()) ||
+          tt_shape_.back() != static_cast<int>(scores_.size())) {
+        fatal_error("Tensor-train channel scaling requires the final two "
+                    "tt_shape dimensions to match tally nuclides and scores.");
+      }
+    }
+    tt_channel_scale_.clear();
 
     tt_sum_ = tt_zeros(tt_shape_);
     tt_sum_sq_ = tt_zeros(tt_shape_);
@@ -916,8 +927,45 @@ void Tally::reset()
       static_cast<size_t>(n_scores), size_t {1}});
     tt_sum_ = tt_zeros(tt_shape_);
     tt_sum_sq_ = tt_zeros(tt_shape_);
+    tt_channel_scale_.clear();
   } else if (results_.size() != 0) {
     results_.fill(0.0);
+  }
+}
+
+void Tally::initialize_tt_channel_scale()
+{
+  int n_filter_bins = results_.shape(0);
+  int n_scores = results_.shape(1);
+  tt_channel_scale_.assign(n_scores, 0.0);
+
+  const double* data = results_.data();
+  for (int i = 0; i < n_filter_bins; ++i) {
+    const double* row = data + i * n_scores;
+    for (int j = 0; j < n_scores; ++j) {
+      double value = row[j];
+      tt_channel_scale_[j] += value * value;
+    }
+  }
+
+  for (double& scale : tt_channel_scale_) {
+    scale = std::sqrt(scale / static_cast<double>(n_filter_bins));
+    if (scale == 0.0)
+      scale = 1.0;
+  }
+}
+
+void Tally::scale_tt_value_results()
+{
+  int n_filter_bins = results_.shape(0);
+  int n_scores = results_.shape(1);
+  double* data = results_.data();
+
+  for (int i = 0; i < n_filter_bins; ++i) {
+    double* row = data + i * n_scores;
+    for (int j = 0; j < n_scores; ++j) {
+      row[j] /= tt_channel_scale_[j];
+    }
   }
 }
 
@@ -950,6 +998,11 @@ void Tally::accumulate()
 
     if (use_tt_) {
       int n = results_.shape(0) * results_.shape(1);
+      if (tt_channel_scaling_) {
+        if (tt_channel_scale_.empty())
+          initialize_tt_channel_scale();
+        scale_tt_value_results();
+      }
       tt_sum_ = tt_sum_ + tt_svd_tally_value(results_.data(), n, tt_shape_,
                             norm, false, tt_eps_);
       tt_sum_sq_ = tt_sum_sq_ + tt_svd_tally_value(results_.data(), n,
@@ -1043,12 +1096,18 @@ void Tally::reconstruct_tt_results()
   results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
     static_cast<size_t>(n_scores), size_t {3}});
 
+  if (!tt_channel_scale_.empty() &&
+      tt_channel_scale_.size() != static_cast<size_t>(n_scores)) {
+    fatal_error("Tensor-train tally channel scale shape mismatch.");
+  }
+
   for (int i = 0; i < n_filter_bins_; ++i) {
     for (int j = 0; j < n_scores; ++j) {
       int flat = i * n_scores + j;
+      double scale = tt_channel_scale_.empty() ? 1.0 : tt_channel_scale_[j];
       results_(i, j, TallyResult::VALUE) = 0.0;
-      results_(i, j, TallyResult::SUM) = sum[flat];
-      results_(i, j, TallyResult::SUM_SQ) = sum_sq[flat];
+      results_(i, j, TallyResult::SUM) = sum[flat] * scale;
+      results_(i, j, TallyResult::SUM_SQ) = sum_sq[flat] * scale * scale;
     }
   }
 }
@@ -1648,6 +1707,21 @@ extern "C" int openmc_tally_set_tt_eps(int32_t index, double eps)
   return 0;
 }
 
+extern "C" int openmc_tally_set_tt_channel_scaling(
+  int32_t index, bool enabled)
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  auto& tally {model::tallies[index]};
+  tally->tt_channel_scaling_ = enabled;
+  if (!enabled)
+    tally->tt_channel_scale_.clear();
+  return 0;
+}
+
 extern "C" int openmc_tally_set_tt_shape(
   int32_t index, int n, const int32_t* shape)
 {
@@ -1702,6 +1776,38 @@ extern "C" int openmc_tally_get_use_tt(int32_t index, bool* use_tt)
   }
 
   *use_tt = model::tallies[index]->use_tt_;
+  return 0;
+}
+
+extern "C" int openmc_tally_get_tt_channel_scale(
+  int32_t index, const double** data, int shape[2])
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  if (data == nullptr || shape == nullptr) {
+    set_errmsg("Tensor-train channel scale output pointer is null.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  auto& tally {model::tallies[index]};
+  if (!tally->use_tt_) {
+    set_errmsg("Tally is not stored in tensor-train format.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  if (tally->tt_channel_scale_.empty()) {
+    *data = nullptr;
+    shape[0] = 0;
+    shape[1] = 0;
+    return 0;
+  }
+
+  shape[0] = static_cast<int>(tally->nuclides_.size());
+  shape[1] = static_cast<int>(tally->scores_.size());
+  *data = tally->tt_channel_scale_.data();
   return 0;
 }
 

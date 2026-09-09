@@ -183,6 +183,11 @@ public:
   //! Relative TT truncation tolerance.
   double tt_eps_ {1.0e-2};
 
+  bool tt_channel_scaling_ {false}; //!< Scale TT channels before compression.
+
+  //! Per-(nuclide, score) scale used for TT tally channel normalization.
+  vector<double> tt_channel_scale_;
+
   //! True if this tally should be written to statepoint files
   bool writable_ {true};
 
@@ -202,6 +207,12 @@ public:
 private:
   //----------------------------------------------------------------------------
   // Private data.
+
+  //! Initialize TT channel scale from the current VALUE buffer.
+  void initialize_tt_channel_scale();
+
+  //! Divide the current TT VALUE buffer by the initialized channel scale.
+  void scale_tt_value_results();
 
   vector<int32_t> filters_; //!< Filter indices in global filters array
 

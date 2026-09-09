@@ -57,6 +57,10 @@ _dll.openmc_tally_get_scores.errcheck = _error_handler
 _dll.openmc_tally_get_use_tt.argtypes = [c_int32, POINTER(c_bool)]
 _dll.openmc_tally_get_use_tt.restype = c_int
 _dll.openmc_tally_get_use_tt.errcheck = _error_handler
+_dll.openmc_tally_get_tt_channel_scale.argtypes = [
+    c_int32, POINTER(POINTER(c_double)), POINTER(c_int*2)]
+_dll.openmc_tally_get_tt_channel_scale.restype = c_int
+_dll.openmc_tally_get_tt_channel_scale.errcheck = _error_handler
 _dll.openmc_tally_get_tt_n_cores.argtypes = [c_int32, c_int, POINTER(c_int)]
 _dll.openmc_tally_get_tt_n_cores.restype = c_int
 _dll.openmc_tally_get_tt_n_cores.errcheck = _error_handler
@@ -98,6 +102,9 @@ _dll.openmc_tally_set_nuclides.errcheck = _error_handler
 _dll.openmc_tally_set_scores.argtypes = [c_int32, c_int, POINTER(c_char_p)]
 _dll.openmc_tally_set_scores.restype = c_int
 _dll.openmc_tally_set_scores.errcheck = _error_handler
+_dll.openmc_tally_set_tt_channel_scaling.argtypes = [c_int32, c_bool]
+_dll.openmc_tally_set_tt_channel_scaling.restype = c_int
+_dll.openmc_tally_set_tt_channel_scaling.errcheck = _error_handler
 _dll.openmc_tally_set_tt_eps.argtypes = [c_int32, c_double]
 _dll.openmc_tally_set_tt_eps.restype = c_int
 _dll.openmc_tally_set_tt_eps.errcheck = _error_handler
@@ -391,6 +398,16 @@ class Tally(_FortranObjectWithID):
         return self._tt(1)
 
     @property
+    def tt_channel_scale(self):
+        data = POINTER(c_double)()
+        shape = (c_int*2)()
+        _dll.openmc_tally_get_tt_channel_scale(self._index, data, shape)
+        scale_shape = tuple(shape)
+        if scale_shape[0] == 0 or scale_shape[1] == 0:
+            return np.empty(scale_shape)
+        return as_array(data, scale_shape)
+
+    @property
     def tt_ranks(self):
         return {
             'sum': self.tt_sum.ranks,
@@ -448,7 +465,13 @@ class Tally(_FortranObjectWithID):
         prefix_index = _flat_to_tt_index(filter_index, filter_shape)
         data = tt_sum._contract_slice(prefix_index)
         data = data.reshape((n_nuclides, n_scores))
+        scale = self.tt_channel_scale
+        if scale.size:
+            data *= scale
         return data / n if n > 0 else data
+
+    def _set_tt_channel_scaling(self, enabled=True):
+        _dll.openmc_tally_set_tt_channel_scaling(self._index, enabled)
 
     def set_tt_eps(self, eps):
         _dll.openmc_tally_set_tt_eps(self._index, eps)

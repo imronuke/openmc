@@ -79,11 +79,15 @@ def _get_tt_depletion_rate_write_data(operator, rates):
             'n_realizations': 0,
             'tt_shape': tuple() if tt_shape is None else tuple(tt_shape),
             'tt_mean': None,
+            'tt_channel_scale': None,
         }
 
     tally = operator._rate_helper._rate_tally
     n_realizations = tally.num_realizations
     tt_sum = tally.tt_sum
+    tt_channel_scale = tally.tt_channel_scale
+    if tt_channel_scale.size == 0:
+        tt_channel_scale = None
     return {
         'zero_source': False,
         'tt_eps': tt_eps,
@@ -92,6 +96,7 @@ def _get_tt_depletion_rate_write_data(operator, rates):
         'n_realizations': n_realizations,
         'tt_shape': tt_sum.shape,
         'tt_mean': _copy_tt_mean(tt_sum, n_realizations),
+        'tt_channel_scale': tt_channel_scale,
     }
 
 
@@ -127,6 +132,9 @@ def _write_tt_depletion_rates(handle, step, data):
 
     if not data['zero_source']:
         _write_tt_hdf5(step_group, 'tt_mean', data['tt_mean'])
+        if data['tt_channel_scale'] is not None:
+            step_group.create_dataset(
+                'tt_channel_scale', data=data['tt_channel_scale'])
 
 
 class TTDepletionRates:
@@ -239,6 +247,14 @@ class TTDepletionRates:
             tt_mean = TT.from_hdf5(step_group['tt_mean'])
             data = tt_mean._contract_slice(prefix_index)
             data = data.reshape((len(self.index_nuc), len(self.index_rx)))
+            if 'tt_channel_scale' in step_group:
+                scale = step_group['tt_channel_scale'][()]
+                expected_shape = (len(self.index_nuc), len(self.index_rx))
+                if scale.shape != expected_shape:
+                    raise RuntimeError(
+                        "Tensor-train channel scale shape is incompatible "
+                        "with reaction-rate metadata.")
+                data *= scale
 
             material_rates = self._empty_material_rates(mat)
             material_rates[:] = data

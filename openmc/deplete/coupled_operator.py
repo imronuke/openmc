@@ -36,7 +36,7 @@ from .tt_depletion import _TTReactionRates, _prepare_tt_reaction_rates
 __all__ = ["CoupledOperator", "Operator", "OperatorResult"]
 
 
-_DEFAULT_TT_EPS = 1.0e-2
+_DEFAULT_TT_EPS = 1.0e-8
 
 
 def _normalize_tt_filter_shape(shape):
