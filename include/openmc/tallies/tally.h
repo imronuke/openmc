@@ -211,9 +211,6 @@ private:
   //! Initialize TT channel scale from the current VALUE buffer.
   void initialize_tt_channel_scale();
 
-  //! Divide the current TT VALUE buffer by the initialized channel scale.
-  void scale_tt_value_results();
-
   vector<int32_t> filters_; //!< Filter indices in global filters array
 
   //! Index strides assigned to each filter to support 1D indexing.

@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <Eigen/Dense>
 
+#include "openmc/vector.h"
+
 namespace openmc {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,13 +123,12 @@ TT tt_svd(const std::vector<double>& tensor,
           double                     eps      = -1.0);
 
 // TT-SVD for an OpenMC tally VALUE buffer. Applies normalization and optionally
-// squares the normalized values before decomposition.
-TT tt_svd_tally_value(const double* value,
-                      int size,
-                      const std::vector<int>& shape,
-                      double norm,
-                      bool square,
-                      double eps = -1.0);
+// squares the normalized values before decomposition. Nonempty channel_scale
+// repeats across filter bins and is divided out before normalization. The input
+// buffer is not modified.
+TT tt_svd_tally_value(const double* value, int size,
+  const std::vector<int>& shape, double norm, bool square, double eps = -1.0,
+  const vector<double>& channel_scale = {});
 
 // TT decomposition via randomized SVD
 TT tt_rand(const std::vector<double>& tensor,

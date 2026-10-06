@@ -955,20 +955,6 @@ void Tally::initialize_tt_channel_scale()
   }
 }
 
-void Tally::scale_tt_value_results()
-{
-  int n_filter_bins = results_.shape(0);
-  int n_scores = results_.shape(1);
-  double* data = results_.data();
-
-  for (int i = 0; i < n_filter_bins; ++i) {
-    double* row = data + i * n_scores;
-    for (int j = 0; j < n_scores; ++j) {
-      row[j] /= tt_channel_scale_[j];
-    }
-  }
-}
-
 void Tally::accumulate()
 {
   // Increment number of realizations
@@ -998,15 +984,16 @@ void Tally::accumulate()
 
     if (use_tt_) {
       int n = results_.shape(0) * results_.shape(1);
-      if (tt_channel_scaling_) {
-        if (tt_channel_scale_.empty())
-          initialize_tt_channel_scale();
-        scale_tt_value_results();
-      }
+      if (tt_channel_scaling_ && tt_channel_scale_.empty())
+        initialize_tt_channel_scale();
+      const vector<double> no_channel_scale;
+      const auto& channel_scale =
+        tt_channel_scaling_ ? tt_channel_scale_ : no_channel_scale;
       tt_sum_ = tt_sum_ + tt_svd_tally_value(results_.data(), n, tt_shape_,
-                            norm, false, tt_eps_);
-      tt_sum_sq_ = tt_sum_sq_ + tt_svd_tally_value(results_.data(), n,
-                                  tt_shape_, norm, true, tt_eps_);
+                            norm, false, tt_eps_, channel_scale);
+      tt_sum_sq_ =
+        tt_sum_sq_ + tt_svd_tally_value(results_.data(), n, tt_shape_, norm,
+                       true, tt_eps_, channel_scale);
       tt_sum_.round(std::nullopt, tt_eps_);
       tt_sum_sq_.round(std::nullopt, tt_eps_);
       std::fill(results_.data(), results_.data() + n, 0.0);
