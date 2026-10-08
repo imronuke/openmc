@@ -23,7 +23,7 @@ def test_xml_roundtrip(run_in_tmpdir):
     tally.triggers = [openmc.Trigger('rel_err', 0.025)]
     tally.triggers[0].scores = ['total', 'fission']
     tally.tt_eps = 1.0e-8
-    tally.tt_shape = (125, 125, 3, 3)
+    tally.tt_shape = (125, 125)
     tallies = openmc.Tallies([tally])
 
     # Roundtrip through XML and make sure we get what we started with

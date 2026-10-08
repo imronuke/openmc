@@ -46,6 +46,7 @@
 #include <iterator> // for back_inserter
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace openmc {
 
@@ -114,6 +115,7 @@ Tally::Tally(pugi::xml_node node)
 
   bool has_tt_eps = check_for_node(node, "tt_eps");
   bool has_tt_shape = check_for_node(node, "tt_shape");
+
   if (has_tt_eps) {
     tt_eps_ = std::stod(get_node_value(node, "tt_eps"));
     if (tt_eps_ <= 0.0) {
@@ -123,6 +125,7 @@ Tally::Tally(pugi::xml_node node)
       fatal_error("Tensor-train tally epsilon requires tt_shape.");
     }
   }
+
   if (has_tt_shape) {
     tt_shape_ = get_node_array<int>(node, "tt_shape");
     if (tt_shape_.empty()) {
@@ -880,32 +883,22 @@ void Tally::init_results()
       static_cast<size_t>(n_scores), size_t {1}});
 
     if (tt_shape_.empty()) {
-      fatal_error("Tensor-train tally accumulation requires tt_shape.");
+      fatal_error("Tensor-train tally shape cannot be empty.");
     }
 
-    int64_t tt_size = 1;
+    int64_t filter_size = 1;
     for (int n : tt_shape_) {
       if (n <= 0) {
         fatal_error("Tensor-train tally shape dimensions must be positive.");
       }
-      tt_size *= n;
+      filter_size *= n;
     }
-    if (tt_size != static_cast<int64_t>(n_filter_bins_) * n_scores) {
-      fatal_error("Tensor-train tally shape does not match dense tally size.");
+    if (filter_size != n_filter_bins_) {
+      fatal_error(
+        "Tensor-train shape does not match the number of filter bins.");
     }
-    if (tt_channel_scaling_) {
-      if (tt_shape_.size() < 2 ||
-          tt_shape_[tt_shape_.size() - 2] !=
-            static_cast<int>(nuclides_.size()) ||
-          tt_shape_.back() != static_cast<int>(scores_.size())) {
-        fatal_error("Tensor-train channel scaling requires the final two "
-                    "tt_shape dimensions to match tally nuclides and scores.");
-      }
-    }
-    tt_channel_scale_.clear();
-
-    tt_sum_ = tt_zeros(tt_shape_);
-    tt_sum_sq_ = tt_zeros(tt_shape_);
+    tt_sum_.assign(n_scores, TT {});
+    tt_sum_sq_.assign(n_scores, TT {});
     return;
   }
 
@@ -921,37 +914,13 @@ void Tally::init_results()
 void Tally::reset()
 {
   n_realizations_ = 0;
-  if (use_tt_ && !tt_shape_.empty()) {
-    int n_scores = scores_.size() * nuclides_.size();
-    results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
-      static_cast<size_t>(n_scores), size_t {1}});
-    tt_sum_ = tt_zeros(tt_shape_);
-    tt_sum_sq_ = tt_zeros(tt_shape_);
-    tt_channel_scale_.clear();
-  } else if (results_.size() != 0) {
+  if (results_.size() != 0) {
     results_.fill(0.0);
   }
-}
-
-void Tally::initialize_tt_channel_scale()
-{
-  int n_filter_bins = results_.shape(0);
-  int n_scores = results_.shape(1);
-  tt_channel_scale_.assign(n_scores, 0.0);
-
-  const double* data = results_.data();
-  for (int i = 0; i < n_filter_bins; ++i) {
-    const double* row = data + i * n_scores;
-    for (int j = 0; j < n_scores; ++j) {
-      double value = row[j];
-      tt_channel_scale_[j] += value * value;
-    }
-  }
-
-  for (double& scale : tt_channel_scale_) {
-    scale = std::sqrt(scale / static_cast<double>(n_filter_bins));
-    if (scale == 0.0)
-      scale = 1.0;
+  if (use_tt_) {
+    int n_channels = scores_.size() * nuclides_.size();
+    tt_sum_.assign(n_channels, TT {});
+    tt_sum_sq_.assign(n_channels, TT {});
   }
 }
 
@@ -983,20 +952,51 @@ void Tally::accumulate()
     }
 
     if (use_tt_) {
-      int n = results_.shape(0) * results_.shape(1);
-      if (tt_channel_scaling_ && tt_channel_scale_.empty())
-        initialize_tt_channel_scale();
-      const vector<double> no_channel_scale;
-      const auto& channel_scale =
-        tt_channel_scaling_ ? tt_channel_scale_ : no_channel_scale;
-      tt_sum_ = tt_sum_ + tt_svd_tally_value(results_.data(), n, tt_shape_,
-                            norm, false, tt_eps_, channel_scale);
-      tt_sum_sq_ =
-        tt_sum_sq_ + tt_svd_tally_value(results_.data(), n, tt_shape_, norm,
-                       true, tt_eps_, channel_scale);
-      tt_sum_.round(std::nullopt, tt_eps_);
-      tt_sum_sq_.round(std::nullopt, tt_eps_);
-      std::fill(results_.data(), results_.data() + n, 0.0);
+      int n_filter_bins = results_.shape(0);
+      int n_channels = results_.shape(1);
+
+#pragma omp parallel for if (n_channels > 1) schedule(dynamic)
+      for (int channel = 0; channel < n_channels; ++channel) {
+        vector<double> channel_values(n_filter_bins);
+        bool nonzero = false;
+        for (int i = 0; i < n_filter_bins; ++i) {
+          double value = results_(i, channel, TallyResult::VALUE);
+          channel_values[i] = value;
+          nonzero = nonzero || value != 0.0;
+        }
+
+        // Empty channels remain represented by an empty TT and reconstruct as
+        // zero, avoiding an SVD for channels with no contribution.
+        if (!nonzero)
+          continue;
+
+        TT sum = tt_svd_tally_value(channel_values.data(), n_filter_bins,
+          tt_shape_, norm, false, tt_eps_);
+        TT sum_sq = tt_svd_tally_value(channel_values.data(), n_filter_bins,
+          tt_shape_, norm, true, tt_eps_);
+
+        if (tt_sum_[channel].cores.empty()) {
+          tt_sum_[channel] = std::move(sum);
+        } else {
+          tt_sum_[channel] = tt_sum_[channel] + sum;
+          tt_sum_[channel].round(std::nullopt, tt_eps_);
+        }
+
+        if (tt_sum_sq_[channel].cores.empty()) {
+          tt_sum_sq_[channel] = std::move(sum_sq);
+        } else {
+          tt_sum_sq_[channel] = tt_sum_sq_[channel] + sum_sq;
+          tt_sum_sq_[channel].round(std::nullopt, tt_eps_);
+        }
+      }
+
+      // VALUE remains dense during scoring and is cleared after all channels
+      // have been accumulated.
+      for (int i = 0; i < n_filter_bins; ++i) {
+        for (int channel = 0; channel < n_channels; ++channel) {
+          results_(i, channel, TallyResult::VALUE) = 0.0;
+        }
+      }
       return;
     }
 
@@ -1040,8 +1040,13 @@ void Tally::write_tt_storage_report() const
   int n_scores = scores_.size() * nuclides_.size();
   auto dense_accumulated_bytes =
     static_cast<std::size_t>(2) * n_filter_bins_ * n_scores * sizeof(double);
-  auto tt_accumulated_bytes =
-    tt_storage_bytes(tt_sum_) + tt_storage_bytes(tt_sum_sq_);
+  std::size_t tt_sum_bytes = 0;
+  std::size_t tt_sum_sq_bytes = 0;
+  for (int channel = 0; channel < n_scores; ++channel) {
+    tt_sum_bytes += tt_storage_bytes(tt_sum_[channel]);
+    tt_sum_sq_bytes += tt_storage_bytes(tt_sum_sq_[channel]);
+  }
+  auto tt_accumulated_bytes = tt_sum_bytes + tt_sum_sq_bytes;
 
   std::string ratio = "inf";
   if (tt_accumulated_bytes > 0) {
@@ -1055,9 +1060,9 @@ void Tally::write_tt_storage_report() const
     dense_accumulated_bytes);
   write_message(5, "  TT accumulated storage           {} bytes",
     tt_accumulated_bytes);
+  write_message(5, "  TT SUM storage                   {} bytes", tt_sum_bytes);
+  write_message(5, "  TT SUM_SQ storage                {} bytes", tt_sum_sq_bytes);
   write_message(5, "  accumulated compression ratio    {}", ratio);
-  write_message(5, "  tt_sum                           {}", tt_sum_.repr());
-  write_message(5, "  tt_sum_sq                        {}", tt_sum_sq_.repr());
 }
 
 void Tally::reconstruct_tt_results()
@@ -1065,36 +1070,42 @@ void Tally::reconstruct_tt_results()
   if (!use_tt_)
     return;
 
-  if (results_.shape(2) >= 3)
-    return;
+  int n_channels = scores_.size() * nuclides_.size();
+  if (tt_sum_.size() != static_cast<std::size_t>(n_channels) ||
+      tt_sum_sq_.size() != static_cast<std::size_t>(n_channels)) {
+    fatal_error("Tensor-train channel storage shape mismatch.");
+  }
 
   write_tt_storage_report();
   write_message(
-    5, "Reconstructing tensor-train tally results for tally {}", id_);
-
-  int n_scores = scores_.size() * nuclides_.size();
-  auto [sum, sum_shape] = tt_sum_.full();
-  auto [sum_sq, sum_sq_shape] = tt_sum_sq_.full();
-
-  if (sum_shape != tt_shape_ || sum_sq_shape != tt_shape_) {
-    fatal_error("Tensor-train tally result shape mismatch.");
-  }
+    5, "Reconstructing per-channel tensor-train results for tally {}", id_);
 
   results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
-    static_cast<size_t>(n_scores), size_t {3}});
+    static_cast<size_t>(n_channels), size_t {3}});
+  results_.fill(0.0);
 
-  if (!tt_channel_scale_.empty() &&
-      tt_channel_scale_.size() != static_cast<size_t>(n_scores)) {
-    fatal_error("Tensor-train tally channel scale shape mismatch.");
-  }
+  for (int channel = 0; channel < n_channels; ++channel) {
+    if (tt_sum_[channel].cores.empty() &&
+        tt_sum_sq_[channel].cores.empty()) {
+      continue;
+    }
 
-  for (int i = 0; i < n_filter_bins_; ++i) {
-    for (int j = 0; j < n_scores; ++j) {
-      int flat = i * n_scores + j;
-      double scale = tt_channel_scale_.empty() ? 1.0 : tt_channel_scale_[j];
-      results_(i, j, TallyResult::VALUE) = 0.0;
-      results_(i, j, TallyResult::SUM) = sum[flat] * scale;
-      results_(i, j, TallyResult::SUM_SQ) = sum_sq[flat] * scale * scale;
+    if (tt_sum_[channel].cores.empty() ||
+        tt_sum_sq_[channel].cores.empty()) {
+      fatal_error("Tensor-train SUM and SUM_SQ channel presence mismatch.");
+    }
+
+    auto [sum, sum_shape] = tt_sum_[channel].full();
+    auto [sum_sq, sum_sq_shape] = tt_sum_sq_[channel].full();
+    if (sum_shape != tt_shape_ || sum_sq_shape != tt_shape_ ||
+        sum.size() != static_cast<std::size_t>(n_filter_bins_) ||
+        sum_sq.size() != static_cast<std::size_t>(n_filter_bins_)) {
+      fatal_error("Tensor-train tally result shape mismatch.");
+    }
+
+    for (int i = 0; i < n_filter_bins_; ++i) {
+      results_(i, channel, TallyResult::SUM) = sum[i];
+      results_(i, channel, TallyResult::SUM_SQ) = sum_sq[i];
     }
   }
 }
@@ -1694,21 +1705,6 @@ extern "C" int openmc_tally_set_tt_eps(int32_t index, double eps)
   return 0;
 }
 
-extern "C" int openmc_tally_set_tt_channel_scaling(
-  int32_t index, bool enabled)
-{
-  if (index < 0 || index >= model::tallies.size()) {
-    set_errmsg("Index in tallies array is out of bounds.");
-    return OPENMC_E_OUT_OF_BOUNDS;
-  }
-
-  auto& tally {model::tallies[index]};
-  tally->tt_channel_scaling_ = enabled;
-  if (!enabled)
-    tally->tt_channel_scale_.clear();
-  return 0;
-}
-
 extern "C" int openmc_tally_set_tt_shape(
   int32_t index, int n, const int32_t* shape)
 {
@@ -1718,25 +1714,26 @@ extern "C" int openmc_tally_set_tt_shape(
   }
 
   if (n <= 0) {
-    set_errmsg("Tensor-train tally shape cannot be empty.");
+    set_errmsg("Tensor-train shape cannot be empty.");
     return OPENMC_E_INVALID_ARGUMENT;
   }
 
   if (!shape) {
-    set_errmsg("Tensor-train tally shape pointer is null.");
+    set_errmsg("Tensor-train shape pointer is null.");
     return OPENMC_E_INVALID_ARGUMENT;
   }
 
   auto& tally {model::tallies[index]};
-  tally->tt_shape_.clear();
-  tally->tt_shape_.reserve(n);
+  vector<int> tt_shape;
+  tt_shape.reserve(n);
   for (int i = 0; i < n; ++i) {
     if (shape[i] <= 0) {
-      set_errmsg("Tensor-train tally shape dimensions must be positive.");
+      set_errmsg("Tensor-train shape dimensions must be positive.");
       return OPENMC_E_INVALID_ARGUMENT;
     }
-    tally->tt_shape_.push_back(shape[i]);
+    tt_shape.push_back(shape[i]);
   }
+  tally->tt_shape_ = std::move(tt_shape);
   tally->use_tt_ = true;
   return 0;
 }
@@ -1766,65 +1763,27 @@ extern "C" int openmc_tally_get_use_tt(int32_t index, bool* use_tt)
   return 0;
 }
 
-extern "C" int openmc_tally_get_tt_channel_scale(
-  int32_t index, const double** data, int shape[2])
+extern "C" int openmc_tally_get_tt_shape(
+  int32_t index, const int32_t** shape, int* n)
 {
   if (index < 0 || index >= model::tallies.size()) {
     set_errmsg("Index in tallies array is out of bounds.");
     return OPENMC_E_OUT_OF_BOUNDS;
   }
 
-  if (data == nullptr || shape == nullptr) {
-    set_errmsg("Tensor-train channel scale output pointer is null.");
+  if (shape == nullptr || n == nullptr) {
+    set_errmsg("Tensor-train shape output pointer is null.");
     return OPENMC_E_INVALID_ARGUMENT;
   }
 
-  auto& tally {model::tallies[index]};
-  if (!tally->use_tt_) {
-    set_errmsg("Tally is not stored in tensor-train format.");
-    return OPENMC_E_INVALID_ARGUMENT;
-  }
-
-  if (tally->tt_channel_scale_.empty()) {
-    *data = nullptr;
-    shape[0] = 0;
-    shape[1] = 0;
-    return 0;
-  }
-
-  shape[0] = static_cast<int>(tally->nuclides_.size());
-  shape[1] = static_cast<int>(tally->scores_.size());
-  *data = tally->tt_channel_scale_.data();
+  const auto& tt_shape = model::tallies[index]->tt_shape_;
+  *shape = tt_shape.data();
+  *n = static_cast<int>(tt_shape.size());
   return 0;
 }
 
 extern "C" int openmc_tally_get_tt_n_cores(
-  int32_t index, int which, int* n)
-{
-  if (index < 0 || index >= model::tallies.size()) {
-    set_errmsg("Index in tallies array is out of bounds.");
-    return OPENMC_E_OUT_OF_BOUNDS;
-  }
-
-  auto& tally {model::tallies[index]};
-  if (!tally->use_tt_) {
-    set_errmsg("Tally is not stored in tensor-train format.");
-    return OPENMC_E_INVALID_ARGUMENT;
-  }
-
-  if (which == 0) {
-    *n = tally->tt_sum_.cores.size();
-  } else if (which == 1) {
-    *n = tally->tt_sum_sq_.cores.size();
-  } else {
-    set_errmsg("Invalid tensor-train result selector.");
-    return OPENMC_E_INVALID_ARGUMENT;
-  }
-  return 0;
-}
-
-extern "C" int openmc_tally_get_tt_core(
-  int32_t index, int which, int core_index, const double** data, int shape[3])
+  int32_t index, int which, int channel, int* n)
 {
   if (index < 0 || index >= model::tallies.size()) {
     set_errmsg("Index in tallies array is out of bounds.");
@@ -1843,7 +1802,44 @@ extern "C" int openmc_tally_get_tt_core(
     set_errmsg("Invalid tensor-train result selector.");
     return OPENMC_E_INVALID_ARGUMENT;
   }
-  if (core_index < 0 || core_index >= tt->cores.size()) {
+  if (channel < 0 || static_cast<std::size_t>(channel) >= tt->size()) {
+    set_errmsg("Tensor-train channel index is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  *n = (*tt)[channel].cores.size();
+  return 0;
+}
+
+extern "C" int openmc_tally_get_tt_core(
+  int32_t index, int which, int channel, int core_index, const double** data,
+  int shape[3])
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  auto& tally {model::tallies[index]};
+  if (!tally->use_tt_) {
+    set_errmsg("Tally is not stored in tensor-train format.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  const auto* tts = which == 0 ? &tally->tt_sum_
+                               : which == 1 ? &tally->tt_sum_sq_ : nullptr;
+  if (tts == nullptr) {
+    set_errmsg("Invalid tensor-train result selector.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+  if (channel < 0 || static_cast<std::size_t>(channel) >= tts->size()) {
+    set_errmsg("Tensor-train channel index is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  const auto* tt = &(*tts)[channel];
+  if (core_index < 0 ||
+      static_cast<std::size_t>(core_index) >= tt->cores.size()) {
     set_errmsg("Tensor-train core index is out of bounds.");
     return OPENMC_E_OUT_OF_BOUNDS;
   }

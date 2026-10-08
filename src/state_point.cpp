@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstdint> // for int64_t
+#include <limits>
 #include <string>
+#include <utility>
 
 #include "openmc/tensor.h"
 #include <fmt/core.h>
@@ -34,71 +36,232 @@
 
 namespace openmc {
 
-void write_tt(hid_t group, const char* name, const TT& tt)
+constexpr int TT_LAYOUT_VERSION {1};
+
+void write_tt_channels(
+  hid_t tally_group, const char* name, const vector<TT>& channels)
 {
-  hid_t tt_group = create_group(group, name);
-  int n_cores = static_cast<int>(tt.cores.size());
-  write_dataset(tt_group, "n_cores", n_cores);
-  for (int i = 0; i < n_cores; ++i) {
-    const auto& core = tt.cores[i];
-    vector<int> shape {core.r_left, core.n, core.r_right};
-    auto core_name = fmt::format("core_{}", i);
-    auto shape_name = fmt::format("core_{}_shape", i);
-    write_dataset(tt_group, core_name.c_str(), core.data);
-    write_dataset(tt_group, shape_name.c_str(), shape);
+  hid_t tt_group = create_group(tally_group, name);
+  vector<int64_t> channel_core_offsets {0};
+  vector<int> core_shapes;
+  vector<int64_t> core_data_offsets {0};
+  vector<double> core_data;
+
+  for (const auto& channel : channels) {
+    for (const auto& core : channel.cores) {
+      core_shapes.push_back(core.r_left);
+      core_shapes.push_back(core.n);
+      core_shapes.push_back(core.r_right);
+      core_data.insert(core_data.end(), core.data.begin(), core.data.end());
+      core_data_offsets.push_back(static_cast<int64_t>(core_data.size()));
+    }
+    channel_core_offsets.push_back(
+      static_cast<int64_t>(core_data_offsets.size() - 1));
   }
+
+  write_dataset(tt_group, "channel_core_offsets", channel_core_offsets);
+  write_dataset(tt_group, "core_shapes", core_shapes);
+  write_dataset(tt_group, "core_data_offsets", core_data_offsets);
+  write_dataset(tt_group, "core_data", core_data);
   close_group(tt_group);
 }
 
-TT read_tt(hid_t group, const char* name)
+vector<TT> read_tt_channels(hid_t tally_group, const char* name,
+  int n_channels, const vector<int>& expected_shape)
 {
-  hid_t tt_group = open_group(group, name);
-  int n_cores;
-  read_dataset(tt_group, "n_cores", n_cores);
-
-  std::vector<Core> cores;
-  cores.reserve(n_cores);
-  for (int i = 0; i < n_cores; ++i) {
-    auto core_name = fmt::format("core_{}", i);
-    auto shape_name = fmt::format("core_{}_shape", i);
-    vector<int> shape;
-    std::vector<double> data;
-    read_dataset(tt_group, shape_name.c_str(), shape);
-    read_dataset(tt_group, core_name.c_str(), data);
-    if (shape.size() != 3) {
-      fatal_error("Tensor-train statepoint core shape must have length 3.");
-    }
-    cores.emplace_back(shape[0], shape[1], shape[2], std::move(data));
-  }
+  hid_t tt_group = open_group(tally_group, name);
+  vector<int64_t> channel_core_offsets;
+  vector<int> core_shapes;
+  vector<int64_t> core_data_offsets;
+  vector<double> core_data;
+  read_dataset(tt_group, "channel_core_offsets", channel_core_offsets);
+  read_dataset(tt_group, "core_shapes", core_shapes);
+  read_dataset(tt_group, "core_data_offsets", core_data_offsets);
+  read_dataset(tt_group, "core_data", core_data);
   close_group(tt_group);
-  return TT(std::move(cores));
+
+  if (channel_core_offsets.size() != static_cast<std::size_t>(n_channels + 1) ||
+      channel_core_offsets.empty() || channel_core_offsets.front() != 0) {
+    fatal_error("Tensor-train channel core offsets have an invalid shape.");
+  }
+  if (core_shapes.size() % 3 != 0) {
+    fatal_error("Tensor-train core shape table has an invalid size.");
+  }
+  const auto n_cores = core_shapes.size() / 3;
+  if (core_data_offsets.size() != n_cores + 1 ||
+      core_data_offsets.empty() || core_data_offsets.front() != 0 ||
+      core_data_offsets.back() != static_cast<int64_t>(core_data.size()) ||
+      channel_core_offsets.back() != static_cast<int64_t>(n_cores)) {
+    fatal_error("Tensor-train core offsets are inconsistent.");
+  }
+
+  for (std::size_t i = 1; i < channel_core_offsets.size(); ++i) {
+    if (channel_core_offsets[i] < channel_core_offsets[i - 1]) {
+      fatal_error("Tensor-train channel core offsets are not monotonic.");
+    }
+  }
+  for (std::size_t i = 1; i < core_data_offsets.size(); ++i) {
+    if (core_data_offsets[i] < core_data_offsets[i - 1]) {
+      fatal_error("Tensor-train core data offsets are not monotonic.");
+    }
+  }
+
+  vector<TT> channels;
+  channels.reserve(n_channels);
+  for (int channel = 0; channel < n_channels; ++channel) {
+    auto first_core = channel_core_offsets[channel];
+    auto end_core = channel_core_offsets[channel + 1];
+    if (first_core < 0 || end_core < first_core ||
+        end_core > static_cast<int64_t>(n_cores)) {
+      fatal_error("Tensor-train channel core offsets are out of bounds.");
+    }
+
+    vector<Core> cores;
+    cores.reserve(static_cast<std::size_t>(end_core - first_core));
+    int previous_rank = 1;
+    for (int64_t core_index = first_core; core_index < end_core;
+         ++core_index) {
+      auto shape_index = static_cast<std::size_t>(core_index) * 3;
+      int r_left = core_shapes[shape_index];
+      int mode = core_shapes[shape_index + 1];
+      int r_right = core_shapes[shape_index + 2];
+      if (r_left <= 0 || mode <= 0 || r_right <= 0) {
+        fatal_error("Tensor-train core dimensions must be positive.");
+      }
+      if (cores.size() >= expected_shape.size() ||
+          mode != expected_shape[cores.size()]) {
+        fatal_error("Tensor-train core modes do not match tt_shape.");
+      }
+      if (r_left != previous_rank) {
+        fatal_error("Tensor-train channel ranks are incompatible.");
+      }
+
+      auto data_begin = core_data_offsets[core_index];
+      auto data_end = core_data_offsets[core_index + 1];
+      if (data_begin < 0 || data_end < data_begin ||
+          data_end > static_cast<int64_t>(core_data.size())) {
+        fatal_error("Tensor-train core data offsets are out of bounds.");
+      }
+      std::size_t expected_size = 1;
+      for (int dim : {r_left, mode, r_right}) {
+        if (expected_size > std::numeric_limits<std::size_t>::max() /
+                              static_cast<std::size_t>(dim)) {
+          fatal_error("Tensor-train core size overflows address space.");
+        }
+        expected_size *= static_cast<std::size_t>(dim);
+      }
+      if (expected_size >
+          static_cast<std::size_t>(std::numeric_limits<int64_t>::max())) {
+        fatal_error("Tensor-train core size exceeds offset range.");
+      }
+      if (expected_size >
+          static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        fatal_error("Tensor-train core size exceeds supported dimensions.");
+      }
+      if (data_end - data_begin != static_cast<int64_t>(expected_size)) {
+        fatal_error("Tensor-train core data size does not match its shape.");
+      }
+      auto begin = core_data.begin() + data_begin;
+      auto end = core_data.begin() + data_end;
+      cores.emplace_back(
+        r_left, mode, r_right, vector<double>(begin, end));
+      previous_rank = r_right;
+    }
+
+    if (!cores.empty() &&
+        (cores.size() != expected_shape.size() || previous_rank != 1)) {
+      fatal_error("Tensor-train channel does not match tt_shape.");
+    }
+    channels.emplace_back(std::move(cores));
+  }
+  return channels;
 }
 
 void write_tally_tt_results(hid_t tally_group, const Tally& tally)
 {
+  int n_channels = tally.scores_.size() * tally.nuclides_.size();
+  if (tally.tt_sum_.size() != static_cast<std::size_t>(n_channels) ||
+      tally.tt_sum_sq_.size() != static_cast<std::size_t>(n_channels)) {
+    fatal_error("Tensor-train statepoint channel count does not match tally.");
+  }
+  for (int channel = 0; channel < n_channels; ++channel) {
+    const auto& sum = tally.tt_sum_[channel];
+    const auto& sum_sq = tally.tt_sum_sq_[channel];
+    if (sum.cores.empty() != sum_sq.cores.empty()) {
+      fatal_error("Tensor-train SUM and SUM_SQ channel layouts differ.");
+    }
+    if ((!sum.cores.empty() && sum.shape() != tally.tt_shape_) ||
+        (!sum_sq.cores.empty() && sum_sq.shape() != tally.tt_shape_)) {
+      fatal_error("Tensor-train statepoint channel shape does not match.");
+    }
+  }
   write_attribute(tally_group, "tt_enabled", 1);
+  write_attribute(tally_group, "tt_layout_version", TT_LAYOUT_VERSION);
   write_dataset(tally_group, "tt_eps", tally.tt_eps_);
   write_dataset(tally_group, "tt_shape", tally.tt_shape_);
-  write_tt(tally_group, "tt_sum", tally.tt_sum_);
-  write_tt(tally_group, "tt_sum_sq", tally.tt_sum_sq_);
+  write_tt_channels(tally_group, "tt_sum", tally.tt_sum_);
+  write_tt_channels(tally_group, "tt_sum_sq", tally.tt_sum_sq_);
 }
 
 void read_tally_tt_results(hid_t tally_group, Tally& tally)
 {
   if (!settings::reduce_tallies) {
-    fatal_error("Tensor-train tally accumulation requires reduced tallies. "
-                "Set <no_reduce>false</no_reduce> or omit <no_reduce> in "
-                "settings.xml.");
+    fatal_error("Tensor-train statepoint data requires reduced tallies.");
   }
-  tally.use_tt_ = true;
+  if (tally.higher_moments()) {
+    fatal_error("Tensor-train statepoint data does not support higher moments.");
+  }
+
+  int tt_enabled;
+  read_attribute(tally_group, "tt_enabled", tt_enabled);
+  if (tt_enabled != 1) {
+    fatal_error("Tensor-train statepoint tally is not marked as enabled.");
+  }
+
+  int layout_version;
+  if (!attribute_exists(tally_group, "tt_layout_version")) {
+    fatal_error("Tensor-train statepoint is missing its layout version.");
+  }
+  read_attribute(tally_group, "tt_layout_version", layout_version);
+  if (layout_version != TT_LAYOUT_VERSION) {
+    fatal_error(fmt::format(
+      "Unsupported tensor-train statepoint layout version {}.",
+      layout_version));
+  }
+
   read_dataset(tally_group, "tt_eps", tally.tt_eps_);
   read_dataset(tally_group, "tt_shape", tally.tt_shape_);
-  tally.tt_sum_ = read_tt(tally_group, "tt_sum");
-  tally.tt_sum_sq_ = read_tt(tally_group, "tt_sum_sq");
+  if (tally.tt_eps_ <= 0.0 || tally.tt_shape_.empty()) {
+    fatal_error("Tensor-train statepoint metadata is invalid.");
+  }
+  int64_t filter_size = 1;
+  for (int dim : tally.tt_shape_) {
+    if (dim <= 0 || filter_size >
+                       std::numeric_limits<int64_t>::max() / dim) {
+      fatal_error("Tensor-train statepoint shape is invalid.");
+    }
+    filter_size *= dim;
+  }
+  if (filter_size != tally.n_filter_bins()) {
+    fatal_error("Tensor-train statepoint shape does not match filter bins.");
+  }
 
-  int n_scores = tally.scores_.size() * tally.nuclides_.size();
-  tally.results_ = tensor::Tensor<double>({static_cast<size_t>(tally.n_filter_bins()),
-    static_cast<size_t>(n_scores), size_t {1}});
+  tally.use_tt_ = true;
+  int n_channels = tally.scores_.size() * tally.nuclides_.size();
+  tally.tt_sum_ = read_tt_channels(
+    tally_group, "tt_sum", n_channels, tally.tt_shape_);
+  tally.tt_sum_sq_ = read_tt_channels(
+    tally_group, "tt_sum_sq", n_channels, tally.tt_shape_);
+  for (std::size_t channel = 0; channel < tally.tt_sum_.size(); ++channel) {
+    if (tally.tt_sum_[channel].cores.empty() !=
+        tally.tt_sum_sq_[channel].cores.empty()) {
+      fatal_error("Tensor-train SUM and SUM_SQ channel layouts differ.");
+    }
+  }
+
+  tally.results_ = tensor::Tensor<double>({
+    static_cast<size_t>(tally.n_filter_bins()),
+    static_cast<size_t>(n_channels), size_t {1}});
 }
 
 extern "C" int openmc_statepoint_write(const char* filename, bool* write_source)
@@ -607,6 +770,9 @@ extern "C" int openmc_statepoint_load(const char* filename)
         } else {
           if (attribute_exists(tally_group, "tt_enabled")) {
             read_tally_tt_results(tally_group, *tally);
+          } else if (tally->use_tt_) {
+            fatal_error(
+              "Tensor-train tally is missing from the statepoint file.");
           } else {
             auto& results = tally->results_;
             read_tally_results(tally_group, results.shape(0), results.shape(1),

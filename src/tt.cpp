@@ -407,6 +407,17 @@ TT TT::operator+(const TT& other) const {
     std::vector<Core> new_cores;
     new_cores.reserve(d);
 
+    if (d == 1) {
+        const Core& G1 = cores[0];
+        const Core& G2 = other.cores[0];
+        Core sum(1, G1.n, 1);
+        for (int j = 0; j < G1.n; ++j) {
+            sum(0, j, 0) = G1(0, j, 0) + G2(0, j, 0);
+        }
+        new_cores.push_back(std::move(sum));
+        return TT(std::move(new_cores));
+    }
+
     for (int k = 0; k < d; ++k) {
         const Core& G1 = cores[k];
         const Core& G2 = other.cores[k];
@@ -590,7 +601,7 @@ TT tt_svd(const std::vector<double>& tensor,
 }
 
 TT tt_svd_tally_value(const double* value, int size, const vector<int>& shape,
-  double norm, bool square, double eps, const vector<double>& channel_scale)
+  double norm, bool square, double eps)
 {
   if (value == nullptr) {
     throw std::invalid_argument("tt_svd_tally_value: value pointer is null");
@@ -611,28 +622,13 @@ TT tt_svd_tally_value(const double* value, int size, const vector<int>& shape,
   if (expected_size != size) {
     throw std::invalid_argument("tt_svd_tally_value: shape/size mismatch");
   }
-  if (!channel_scale.empty() && size % channel_scale.size() != 0) {
-    throw std::invalid_argument(
-      "tt_svd_tally_value: channel scale/size mismatch");
-  }
   if (eps < 0.0)
     eps = 1e-10;
 
   vector<double> buf(size);
-  if (channel_scale.empty()) {
-    for (int i = 0; i < size; ++i) {
-      double v = value[i] * norm;
-      buf[i] = square ? v * v : v;
-    }
-  } else {
-    int n_channels = channel_scale.size();
-    for (int i = 0; i < size; i += n_channels) {
-      for (int j = 0; j < n_channels; ++j) {
-        // Preserve the original division, normalization, then squaring order.
-        double v = (value[i + j] / channel_scale[j]) * norm;
-        buf[i + j] = square ? v * v : v;
-      }
-    }
+  for (int i = 0; i < size; ++i) {
+    double v = value[i] * norm;
+    buf[i] = square ? v * v : v;
   }
 
   return decompose_buffer(std::move(buf), shape, {}, eps);

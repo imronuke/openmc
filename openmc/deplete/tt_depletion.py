@@ -2,11 +2,13 @@
 
 import time
 from itertools import repeat
+from math import prod
 
 import h5py
 import numpy as np
 
-from openmc.tt import TT, _flat_to_tt_index
+from openmc.tt import (
+    TT, _TT_LAYOUT_VERSION, _flat_to_tt_index, _write_packed_tt_channels)
 
 from .reaction_rates import ReactionRates
 
@@ -15,17 +17,6 @@ __all__ = ["TTDepletionRates"]
 
 
 _TT_DEPLETION_RATES = "tt_depletion_reaction_rates"
-
-
-def _tt_filter_split(tt_shape, score_size):
-    if score_size == 1:
-        return len(tt_shape)
-    product = 1
-    for i in range(len(tt_shape) - 1, -1, -1):
-        product *= tt_shape[i]
-        if product == score_size:
-            return i
-    raise RuntimeError("Tensor-train shape is incompatible with tally scores.")
 
 
 class _TTReactionRates:
@@ -46,16 +37,7 @@ def _copy_tt_mean(tt, n_realizations):
     cores = [core.copy() for core in tt.cores]
     if n_realizations > 0 and cores:
         cores[0] /= n_realizations
-    return TT(cores)
-
-
-def _write_tt_hdf5(group, name, tt):
-    """Write a TT object to an HDF5 group."""
-    tt_group = group.create_group(name)
-    tt_group.create_dataset("n_cores", data=len(tt.cores))
-    for i, core in enumerate(tt.cores):
-        tt_group.create_dataset(f"core_{i}_shape", data=np.asarray(core.shape))
-        tt_group.create_dataset(f"core_{i}", data=core.ravel())
+    return TT(cores, shape=tt.shape)
 
 
 def _get_tt_depletion_rate_write_data(operator, rates):
@@ -69,6 +51,10 @@ def _get_tt_depletion_rate_write_data(operator, rates):
     if reaction_rate_mask is None:
         reaction_rate_mask = _tt_reaction_rate_mask(
             operator.chain, operator.reaction_rates)
+    _, nuc_indices, reaction_indices = _tt_rate_indices(operator)
+    channel_indices = np.asarray(
+        [(i_nuc, i_rx) for i_nuc in nuc_indices
+         for i_rx in reaction_indices], dtype=np.int64).reshape((-1, 2))
 
     if getattr(rates, 'zero_source', False):
         return {
@@ -78,32 +64,40 @@ def _get_tt_depletion_rate_write_data(operator, rates):
             'normalization_factor': 0.0,
             'n_realizations': 0,
             'tt_shape': tuple() if tt_shape is None else tuple(tt_shape),
-            'tt_mean': None,
-            'tt_channel_scale': None,
+            'channel_indices': channel_indices,
+            'tt_means': None,
         }
 
     tally = operator._rate_helper._rate_tally
     n_realizations = tally.num_realizations
-    tt_sum = tally.tt_sum
-    tt_channel_scale = tally.tt_channel_scale
-    if tt_channel_scale.size == 0:
-        tt_channel_scale = None
+    tt_shape = tally.tt_shape
+    tt_sum = tuple(tally.tt_sum)
+    if any(tt.shape != tt_shape for tt in tt_sum):
+        raise RuntimeError(
+            "Tensor-train channel shape does not match depletion filter "
+            "shape.")
+    if len(tt_sum) != len(channel_indices):
+        raise RuntimeError(
+            "Tensor-train channel count does not match depletion rate "
+            "indices.")
     return {
         'zero_source': False,
         'tt_eps': tt_eps,
         'reaction_rate_mask': reaction_rate_mask,
         'normalization_factor': rates.normalization_factor,
         'n_realizations': n_realizations,
-        'tt_shape': tt_sum.shape,
-        'tt_mean': _copy_tt_mean(tt_sum, n_realizations),
-        'tt_channel_scale': tt_channel_scale,
+        'tt_shape': tt_shape,
+        'channel_indices': channel_indices,
+        'tt_means': tuple(
+            _copy_tt_mean(tt, n_realizations) for tt in tt_sum),
     }
 
 
 def _write_tt_depletion_rates(handle, step, data):
     """Write per-step TT depletion reaction-rate data to HDF5."""
     group = handle.require_group(_TT_DEPLETION_RATES)
-    group.attrs['format_version'] = 1
+    group.attrs['format_version'] = 2
+    group.attrs['tt_layout_version'] = _TT_LAYOUT_VERSION
     group.attrs['stored_values'] = np.bytes_('tally_mean')
     group.attrs['normalization_mode'] = np.bytes_('fission-q')
     if data['tt_eps'] is not None:
@@ -116,6 +110,15 @@ def _write_tt_depletion_rates(handle, step, data):
                 "depletion steps.")
     else:
         group.create_dataset('reaction_rate_mask', data=reaction_rate_mask)
+
+    channel_indices = np.asarray(data['channel_indices'], dtype=np.int64)
+    if 'channel_indices' in group:
+        if not np.array_equal(group['channel_indices'][()], channel_indices):
+            raise ValueError(
+                "Tensor-train channel indices changed between depletion "
+                "steps.")
+    else:
+        group.create_dataset('channel_indices', data=channel_indices)
 
     steps = group.require_group('steps')
     step_name = str(step)
@@ -131,10 +134,8 @@ def _write_tt_depletion_rates(handle, step, data):
         'tt_shape', data=np.asarray(data['tt_shape'], dtype=np.int64))
 
     if not data['zero_source']:
-        _write_tt_hdf5(step_group, 'tt_mean', data['tt_mean'])
-        if data['tt_channel_scale'] is not None:
-            step_group.create_dataset(
-                'tt_channel_scale', data=data['tt_channel_scale'])
+        tt_mean_group = step_group.create_group('tt_mean')
+        _write_packed_tt_channels(tt_mean_group, data['tt_means'])
 
 
 class TTDepletionRates:
@@ -157,6 +158,17 @@ class TTDepletionRates:
                     "depletion reaction rates.")
 
             tt_group = handle[_TT_DEPLETION_RATES]
+            format_version = int(tt_group.attrs.get('format_version', -1))
+            if format_version != 2:
+                raise RuntimeError(
+                    f"Unsupported TT depletion results format version "
+                    f"{format_version}.")
+            layout_version = int(
+                tt_group.attrs.get('tt_layout_version', -1))
+            if layout_version != _TT_LAYOUT_VERSION:
+                raise RuntimeError(
+                    f"Unsupported tensor-train layout version "
+                    f"{layout_version}.")
             self.tt_eps = tt_group.attrs.get('tt_eps')
             if self.tt_eps is not None:
                 self.tt_eps = float(self.tt_eps)
@@ -194,7 +206,30 @@ class TTDepletionRates:
                     "Tensor-train reaction-rate mask shape is "
                     "incompatible with reaction-rate metadata.")
 
+            if 'channel_indices' not in tt_group:
+                raise RuntimeError(
+                    "Tensor-train channel indices are missing.")
+            self.channel_indices = np.asarray(
+                tt_group['channel_indices'][()], dtype=np.int64)
+            if (self.channel_indices.ndim != 2 or
+                    self.channel_indices.shape[1] != 2):
+                raise RuntimeError(
+                    "Tensor-train channel indices have an invalid shape.")
+            if (np.any(self.channel_indices[:, 0] < 0) or
+                    np.any(self.channel_indices[:, 0] >= len(self.index_nuc)) or
+                    np.any(self.channel_indices[:, 1] < 0) or
+                    np.any(self.channel_indices[:, 1] >= len(self.index_rx))):
+                raise RuntimeError(
+                    "Tensor-train channel indices are out of bounds.")
+            if len({tuple(pair) for pair in self.channel_indices}) != len(
+                    self.channel_indices):
+                raise RuntimeError(
+                    "Tensor-train channel indices contain duplicates.")
+
             self.n_steps = handle['number'].shape[0]
+
+        self._cached_step = None
+        self._cached_tt_means = None
 
     def _normalize_step(self, step):
         if step < 0:
@@ -236,31 +271,29 @@ class TTDepletionRates:
                 return self._empty_material_rates(mat)
 
             tt_shape = tuple(int(x) for x in step_group['tt_shape'][()])
-            score_size = len(self.index_nuc) * len(self.index_rx)
-            split = _tt_filter_split(tt_shape, score_size)
-            filter_shape = tt_shape[:split]
-            n_filter_bins = int(np.prod(filter_shape))
+            filter_shape = tt_shape
+            n_filter_bins = prod(filter_shape)
             if mat_index < 0 or mat_index >= n_filter_bins:
                 raise IndexError("Material index is out of bounds.")
 
             prefix_index = _flat_to_tt_index(mat_index, filter_shape)
-            tt_mean = TT.from_hdf5(step_group['tt_mean'])
-            data = tt_mean._contract_slice(prefix_index)
-            data = data.reshape((len(self.index_nuc), len(self.index_rx)))
-            if 'tt_channel_scale' in step_group:
-                scale = step_group['tt_channel_scale'][()]
-                expected_shape = (len(self.index_nuc), len(self.index_rx))
-                if scale.shape != expected_shape:
+            if self._cached_step != step:
+                if 'tt_mean' not in step_group:
                     raise RuntimeError(
-                        "Tensor-train channel scale shape is incompatible "
-                        "with reaction-rate metadata.")
-                data *= scale
+                        "Tensor-train means are missing from depletion step.")
+                self._cached_tt_means = TT.from_hdf5_channels(
+                    step_group['tt_mean'], tt_shape,
+                    len(self.channel_indices))
+                self._cached_step = step
 
             material_rates = self._empty_material_rates(mat)
-            material_rates[:] = data
-            material_rates *= (
+            factor = (
                 step_group['normalization_factor'][()] /
                 (1e24 * self.volume[mat]))
+            for (i_nuc, i_rx), tt_mean in zip(
+                    self.channel_indices, self._cached_tt_means):
+                material_rates[i_nuc, i_rx] = (
+                    float(tt_mean._contract_slice(prefix_index)) * factor)
             return material_rates
 
     def get_rate(self, step, mat, nuc, rx):

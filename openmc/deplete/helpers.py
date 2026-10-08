@@ -149,6 +149,8 @@ class DirectReactionRateHelper(ReactionRateHelper):
     def __init__(self, n_nuc, n_react, tt_shape=None, tt_eps=None):
         super().__init__(n_nuc, n_react)
         self._rate_tally = None
+        self._tt_slice_reader = None
+        self._rate_tally_means_cache = None
         self._tt_shape = tt_shape
         self._tt_eps = tt_eps
         if tt_shape is not None:
@@ -164,8 +166,10 @@ class DirectReactionRateHelper(ReactionRateHelper):
 
     @ReactionRateHelper.nuclides.setter
     def nuclides(self, nuclides):
+        self._tt_slice_reader = None
         ReactionRateHelper.nuclides.fset(self, nuclides)
-        self._rate_tally.nuclides = nuclides
+        if self._rate_tally is not None:
+            self._rate_tally.nuclides = nuclides
 
     def generate_tallies(self, materials, scores):
         """Produce one-group reaction rate tally
@@ -182,6 +186,7 @@ class DirectReactionRateHelper(ReactionRateHelper):
             Reaction identifiers, e.g. ``"(n, fission)"``, ``"(n, gamma)"``,
             needed for the reaction rate tally.
         """
+        self._tt_slice_reader = None
         self._rate_tally = Tally()
         self._rate_tally.writable = False
         self._rate_tally.scores = scores
@@ -189,16 +194,13 @@ class DirectReactionRateHelper(ReactionRateHelper):
         self._rate_tally.multiply_density = False
         if self._tt_shape is not None:
             tt_size = 1
-            score_size = (
-                self._results_cache.shape[0] * self._results_cache.shape[1])
             for n in self._tt_shape:
                 tt_size *= n
-            if tt_size != len(materials) * score_size:
+            if tt_size != len(materials):
                 raise ValueError(
-                    "Tensor-train tally shape does not match depletion "
-                    "material, nuclide, and reaction dimensions.")
+                    "Tensor-train shape does not match the number "
+                    "of depletion material bins.")
             self._rate_tally.set_tt_shape(self._tt_shape)
-            self._rate_tally._set_tt_channel_scaling()
             if self._tt_eps is not None:
                 self._rate_tally.set_tt_eps(self._tt_eps)
         self._rate_tally_means_cache = None
@@ -219,6 +221,7 @@ class DirectReactionRateHelper(ReactionRateHelper):
                 This step must be performed after each transport cycle
         """
         self._rate_tally_means_cache = None
+        self._tt_slice_reader = None
 
     def get_material_rates(self, mat_index, nuc_index, rx_index):
         """Return an array of reaction rates for a material
@@ -241,7 +244,10 @@ class DirectReactionRateHelper(ReactionRateHelper):
         """
         self._results_cache.fill(0.0)
         if self._rate_tally.uses_tt:
-            rate_slice = self._rate_tally.get_tt_slice(mat_index)
+            if self._tt_slice_reader is None:
+                self._tt_slice_reader = (
+                    self._rate_tally._get_tt_slice_reader())
+            rate_slice = self._tt_slice_reader.get_slice(mat_index)
             for i_tally_nuc, i_nuc in enumerate(nuc_index):
                 for i_tally_rx, i_rx in enumerate(rx_index):
                     self._results_cache[i_nuc, i_rx] = (

@@ -171,22 +171,17 @@ public:
   //! Whether to store accumulated SUM/SUM_SQ in tensor-train format.
   bool use_tt_ {false};
 
-  //! Tensor-train accumulated SUM.
-  TT tt_sum_;
+  //! Per-channel tensor-train accumulated SUM.
+  vector<TT> tt_sum_;
 
-  //! Tensor-train accumulated SUM_SQ.
-  TT tt_sum_sq_;
+  //! Per-channel tensor-train accumulated SUM_SQ.
+  vector<TT> tt_sum_sq_;
 
-  //! Logical tensor shape used by TT accumulation.
+  //! Filter-bin shape compressed independently for each nuclide-score channel.
   vector<int> tt_shape_;
 
   //! Relative TT truncation tolerance.
   double tt_eps_ {1.0e-2};
-
-  bool tt_channel_scaling_ {false}; //!< Scale TT channels before compression.
-
-  //! Per-(nuclide, score) scale used for TT tally channel normalization.
-  vector<double> tt_channel_scale_;
 
   //! True if this tally should be written to statepoint files
   bool writable_ {true};
@@ -207,9 +202,6 @@ public:
 private:
   //----------------------------------------------------------------------------
   // Private data.
-
-  //! Initialize TT channel scale from the current VALUE buffer.
-  void initialize_tt_channel_scale();
 
   vector<int32_t> filters_; //!< Filter indices in global filters array
 

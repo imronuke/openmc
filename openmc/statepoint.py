@@ -13,22 +13,12 @@ from uncertainties.unumpy import uarray
 
 import openmc
 import openmc.checkvalue as cv
+from openmc.tt import _TT_LAYOUT_VERSION, _read_packed_tt_ranks
 
 _VERSION_STATEPOINT = 18
 
 
 KineticsParameters = namedtuple("KineticsParameters", ["generation_time", "beta_effective"])
-
-
-def _read_tt_ranks(group):
-    n_cores = int(group['n_cores'][()])
-    ranks = []
-    for i in range(n_cores):
-        shape = group[f'core_{i}_shape'][()]
-        if i == 0:
-            ranks.append(int(shape[0]))
-        ranks.append(int(shape[2]))
-    return tuple(ranks)
 
 
 class StatePoint:
@@ -455,14 +445,6 @@ class StatePoint:
                     tally.estimator = group['estimator'][()].decode()
                     tally.num_realizations = n_realizations
 
-                    if 'tt_enabled' in group.attrs:
-                        tally.tt_eps = float(group['tt_eps'][()])
-                        tally._tt_shape = tuple(int(x) for x in group['tt_shape'][()])
-                        tally._tt_ranks = {
-                            'sum': _read_tt_ranks(group['tt_sum']),
-                            'sum_sq': _read_tt_ranks(group['tt_sum_sq']),
-                        }
-
                     # Read derivative information.
                     if 'derivative' in group:
                         deriv_id = group['derivative'][()]
@@ -488,6 +470,32 @@ class StatePoint:
                     # Add the scores to the Tally
                     scores = group['score_bins'][()]
                     tally.scores = [score.decode() for score in scores]
+
+                    if 'tt_enabled' in group.attrs:
+                        if int(group.attrs['tt_enabled']) != 1:
+                            raise ValueError(
+                                f'Tensor-train results for tally ID="{tally_id}" '
+                                'are not marked as enabled.')
+                        layout_version = int(
+                            group.attrs.get('tt_layout_version', -1))
+                        if layout_version != _TT_LAYOUT_VERSION:
+                            raise ValueError(
+                                f'Unsupported tensor-train statepoint layout '
+                                f'version {layout_version}.')
+                        tally.tt_shape = tuple(
+                            int(x) for x in group['tt_shape'][()])
+                        if int(np.prod(tally.tt_shape)) != tally.num_filter_bins:
+                            raise ValueError(
+                                f'TT shape for tally ID="{tally.id}" does not '
+                                'match its number of filter bins.')
+                        tally.tt_eps = float(group['tt_eps'][()])
+                        n_channels = tally.num_nuclides * tally.num_scores
+                        tally._tt_ranks = {
+                            'sum': _read_packed_tt_ranks(
+                                group['tt_sum'], tally.tt_shape, n_channels),
+                            'sum_sq': _read_packed_tt_ranks(
+                                group['tt_sum_sq'], tally.tt_shape, n_channels),
+                        }
 
                     # Add Tally to the global dictionary of all Tallies
                     tally.sparse = self.sparse

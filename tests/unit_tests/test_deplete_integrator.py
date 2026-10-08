@@ -8,6 +8,7 @@ will be left unimplemented and testing will be done via regression.
 
 import copy
 from random import uniform
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import h5py
@@ -181,11 +182,17 @@ def test_results_save_tt_rates(run_in_tmpdir):
     ]
     tally = MagicMock()
     tally.num_realizations = 4
-    tally.tt_sum = TT(cores)
+    tally.tt_shape = (2, 3, 4)
+    tally.tt_sum = (
+        TT(cores),
+        TT([2.0 * core for core in cores]),
+    )
     op._rate_helper = MagicMock()
     op._rate_helper._tt_eps = 1.0e-20
     op._rate_helper._tt_shape = (2, 3, 4)
+    op._rate_helper.nuclides = ['U235']
     op._rate_helper._rate_tally = tally
+    op.chain = SimpleNamespace(reactions=['fission', 'capture'])
 
     x = [np.array([1.0, 2.0])]
     reaction_rate_mask = np.array([[True, False]])
@@ -205,12 +212,15 @@ def test_results_save_tt_rates(run_in_tmpdir):
         assert handle['reactions/capture'].attrs['index'] == 1
 
         group = handle['tt_depletion_reaction_rates']
-        assert group.attrs['format_version'] == 1
+        assert group.attrs['format_version'] == 2
+        assert group.attrs['tt_layout_version'] == 1
         assert group.attrs['stored_values'] == b'tally_mean'
         assert group.attrs['normalization_mode'] == b'fission-q'
         assert group.attrs['tt_eps'] == 1.0e-20
         np.testing.assert_array_equal(
             group['reaction_rate_mask'][()], reaction_rate_mask)
+        np.testing.assert_array_equal(
+            group['channel_indices'][()], [[0, 0], [0, 1]])
 
         step = group['steps/0']
         assert not step.attrs['zero_source']
@@ -219,14 +229,23 @@ def test_results_save_tt_rates(run_in_tmpdir):
         np.testing.assert_array_equal(step['tt_shape'][()], [2, 3, 4])
 
         tt_mean = step['tt_mean']
-        assert tt_mean['n_cores'][()] == 3
-        np.testing.assert_array_equal(tt_mean['core_0_shape'][()], (1, 2, 1))
-        np.testing.assert_array_equal(tt_mean['core_1_shape'][()], (1, 3, 2))
-        np.testing.assert_array_equal(tt_mean['core_2_shape'][()], (2, 4, 1))
+        np.testing.assert_array_equal(
+            tt_mean['channel_core_offsets'][()], [0, 3, 6])
+        np.testing.assert_array_equal(
+            tt_mean['core_shapes'][()].reshape(-1, 3),
+            [(1, 2, 1), (1, 3, 2), (2, 4, 1)] * 2)
+        np.testing.assert_array_equal(
+            tt_mean['core_data_offsets'][()], [0, 2, 8, 16, 18, 24, 32])
         np.testing.assert_allclose(
-            tt_mean['core_0'][()], (cores[0] / 4).ravel())
-        np.testing.assert_allclose(tt_mean['core_1'][()], cores[1].ravel())
-        np.testing.assert_allclose(tt_mean['core_2'][()], cores[2].ravel())
+            tt_mean['core_data'][0:2], (cores[0] / 4).ravel())
+        np.testing.assert_allclose(tt_mean['core_data'][2:8], cores[1].ravel())
+        np.testing.assert_allclose(tt_mean['core_data'][8:16], cores[2].ravel())
+        np.testing.assert_allclose(
+            tt_mean['core_data'][16:18], (2 * cores[0] / 4).ravel())
+        np.testing.assert_allclose(
+            tt_mean['core_data'][18:24], (2 * cores[1]).ravel())
+        np.testing.assert_allclose(
+            tt_mean['core_data'][24:32], (2 * cores[2]).ravel())
 
     results = Results('depletion_results.h5')
     np.testing.assert_allclose(results[0].data, [[1.0, 2.0]])
@@ -250,16 +269,19 @@ def test_tt_depletion_rates_reader(run_in_tmpdir):
     op.reaction_rates = ReactionRates(
         burn_list, ["U235"], ["fission", "capture"])
 
-    cores = [
-        np.array([[[70.0], [110.0]]]),
-    ]
     tally = MagicMock()
     tally.num_realizations = 5
-    tally.tt_sum = TT(cores)
+    tally.tt_shape = (1,)
+    tally.tt_sum = (
+        TT([np.array([[[70.0]]])], shape=(1,)),
+        TT([np.array([[[110.0]]])], shape=(1,)),
+    )
     op._rate_helper = MagicMock()
     op._rate_helper._tt_eps = 1.0e-12
-    op._rate_helper._tt_shape = (2,)
+    op._rate_helper._tt_shape = (1,)
+    op._rate_helper.nuclides = ['U235']
     op._rate_helper._rate_tally = tally
+    op.chain = SimpleNamespace(reactions=['fission', 'capture'])
 
     x = [np.array([1.0])]
     reaction_rate_mask = np.array([[True, False]])
@@ -309,6 +331,8 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
     op._rate_helper = MagicMock()
     op._rate_helper._tt_eps = 1.0e-30
     op._rate_helper._tt_shape = (1,)
+    op._rate_helper.nuclides = ['U235']
+    op.chain = SimpleNamespace(reactions=['fission'])
 
     x = [np.array([1.0])]
     reaction_rate_mask = np.array([[True]])

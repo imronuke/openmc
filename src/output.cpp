@@ -681,8 +681,13 @@ void write_tallies()
       int n_scores = tally.scores_.size() * tally.nuclides_.size();
       auto dense_bytes = static_cast<std::size_t>(2) * tally.n_filter_bins() *
                          n_scores * sizeof(double);
-      auto tt_bytes =
-        tt_storage_bytes(tally.tt_sum_) + tt_storage_bytes(tally.tt_sum_sq_);
+      std::size_t tt_sum_bytes = 0;
+      std::size_t tt_sum_sq_bytes = 0;
+      for (int channel = 0; channel < n_scores; ++channel) {
+        tt_sum_bytes += tt_storage_bytes(tally.tt_sum_[channel]);
+        tt_sum_sq_bytes += tt_storage_bytes(tally.tt_sum_sq_[channel]);
+      }
+      auto tt_bytes = tt_sum_bytes + tt_sum_sq_bytes;
       std::string ratio = "inf";
       if (tt_bytes > 0) {
         ratio =
@@ -706,12 +711,14 @@ void write_tallies()
         dense_bytes);
       fmt::print(tallies_out, "  TT accumulated storage        {} bytes\n",
         tt_bytes);
+      fmt::print(tallies_out, "  TT SUM storage                {} bytes\n",
+        tt_sum_bytes);
+      fmt::print(tallies_out, "  TT SUM_SQ storage             {} bytes\n",
+        tt_sum_sq_bytes);
       fmt::print(tallies_out, "  Accumulated compression ratio {}\n",
         ratio);
-      fmt::print(tallies_out, "  tt_sum                        {}\n",
-        tally.tt_sum_.repr());
-      fmt::print(tallies_out, "  tt_sum_sq                     {}\n\n",
-        tally.tt_sum_sq_.repr());
+      fmt::print(tallies_out, "  Channels                      {}\n\n",
+        n_scores);
       continue;
     }
 

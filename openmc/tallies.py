@@ -37,7 +37,7 @@ from ._sparse_compat import lil_array
 from ._xml import clean_indentation, get_elem_list, get_text
 from .mixin import IDManagerMixin
 from .mesh import MeshBase
-from .tt import TT
+from .tt import TT, _TT_LAYOUT_VERSION
 
 
 # The tally arithmetic product types. The tensor product performs the full
@@ -81,11 +81,12 @@ class Tally(IDManagerMixin):
     derivative : openmc.TallyDerivative, optional
         A material perturbation derivative to apply to all scores in the tally
     tt_eps : float, optional
-        Relative tensor-train truncation tolerance. If specified, ``tt_shape``
-        must also be specified.
+        Relative tensor-train truncation tolerance. If specified,
+        ``tt_shape`` must also be specified.
     tt_shape : iterable of int, optional
-        Logical tensor shape used for tensor-train tally accumulation. If
-        specified, enables tensor-train tally accumulation for this tally.
+        Shape of the filter-bin tensor compressed independently for each
+        nuclide-score channel. If specified, enables tensor-train tally
+        accumulation for this tally.
 
     Attributes
     ----------
@@ -157,7 +158,16 @@ class Tally(IDManagerMixin):
     tt_eps : float or None
         Relative tensor-train truncation tolerance.
     tt_shape : tuple of int or None
-        Logical tensor shape used for tensor-train tally accumulation.
+        Filter-bin tensor shape used for per-channel tensor-train accumulation.
+    tt_sum : tuple of TT
+        Accumulated sums for each nuclide-score channel. Channels are ordered
+        with nuclides as the outer index and scores as the inner index.
+    tt_sum_sq : tuple of TT
+        Accumulated sums of squares for each nuclide-score channel, in the
+        same order as ``tt_sum``.
+    tt_ranks : dict
+        Tensor-train ranks for ``sum`` and ``sum_sq``, with one rank tuple per
+        channel.
 
     """
 
@@ -340,6 +350,10 @@ class Tally(IDManagerMixin):
         cv.check_type('tt_shape', value, Iterable, none_ok=True)
         if value is None:
             self._tt_shape = None
+            self._tt_results_read = False
+            self._tt_ranks = None
+            self._tt_sum = None
+            self._tt_sum_sq = None
             return
         shape = tuple(value)
         if not shape:
@@ -348,9 +362,15 @@ class Tally(IDManagerMixin):
             cv.check_type('tt_shape dimension', dim, Integral)
             cv.check_greater_than('tt_shape dimension', dim, 0)
         self._tt_shape = tuple(int(dim) for dim in shape)
+        self._tt_results_read = False
+        self._tt_ranks = None
+        self._tt_sum = None
+        self._tt_sum_sq = None
 
     @property
     def tt_ranks(self):
+        if self._tt_ranks is None and self.uses_tt and self._sp_filename:
+            self._read_tt_results()
         return self._tt_ranks
 
     @property
@@ -374,8 +394,13 @@ class Tally(IDManagerMixin):
         self._filters = cv.CheckedList(_FILTER_CLASSES, 'tally filters', filters)
 
     @property
-    @ensure_results
     def nuclides(self):
+        # StatePoint reads tally metadata, including nuclides, before any
+        # results are accessed. TT tallies cannot use _read_results because
+        # their results are intentionally not reconstructed as dense arrays.
+        if (self._sp_filename is not None and not self.derived and
+                not self.uses_tt):
+            self._read_results()
         return self._nuclides
 
     @nuclides.setter
@@ -471,8 +496,12 @@ class Tally(IDManagerMixin):
                                         triggers)
 
     @property
-    @ensure_results
     def num_realizations(self):
+        # The StatePoint reader loads this metadata eagerly. Avoid routing TT
+        # tallies through _read_results, which only handles dense data.
+        if (self._sp_filename is not None and not self.derived and
+                not self.uses_tt):
+            self._read_results()
         return self._num_realizations
 
     @num_realizations.setter
@@ -500,8 +529,8 @@ class Tally(IDManagerMixin):
             group = f[f'tallies/tally {self.id}']
             if 'tt_enabled' in group.attrs:
                 raise RuntimeError(
-                    f'Tally ID="{self.id}" is stored in tensor-train format. '
-                    'Use explicit tensor-train reconstruction methods instead.'
+                    'This tally is stored in tensor-train format. Use '
+                    'get_tt_value() or get_tt_values() to read its results.'
                 )
             self._num_realizations = int(group['n_realizations'][()])
 
@@ -571,10 +600,53 @@ class Tally(IDManagerMixin):
 
         with h5py.File(self._sp_filename, 'r') as f:
             group = f[f'tallies/tally {self.id}']
-            self._tt_sum = TT.from_hdf5(group['tt_sum'])
-            self._tt_sum_sq = TT.from_hdf5(group['tt_sum_sq'])
+            if 'tt_enabled' not in group.attrs:
+                raise RuntimeError(
+                    f'Tally ID="{self.id}" does not contain TT results.')
+            if int(group.attrs['tt_enabled']) != 1:
+                raise ValueError(
+                    f'TT results for tally ID="{self.id}" are not enabled.')
+            layout_version = int(group.attrs.get('tt_layout_version', -1))
+            if layout_version != _TT_LAYOUT_VERSION:
+                raise ValueError(
+                    f'Unsupported tensor-train statepoint layout version '
+                    f'{layout_version}.')
+            self._num_realizations = int(group['n_realizations'][()])
+            self.tt_shape = tuple(int(x) for x in group['tt_shape'][()])
+            if int(np.prod(self.tt_shape)) != self.num_filter_bins:
+                raise RuntimeError(
+                    f'TT shape for tally ID="{self.id}" does not match its '
+                    'number of filter bins.')
+            self.tt_eps = float(group['tt_eps'][()])
+            n_channels = self.num_nuclides * self.num_scores
+            self._tt_sum = TT.from_hdf5_channels(
+                group['tt_sum'], self.tt_shape, n_channels)
+            self._tt_sum_sq = TT.from_hdf5_channels(
+                group['tt_sum_sq'], self.tt_shape, n_channels)
+            for channel, (sum_, sum_sq) in enumerate(
+                    zip(self._tt_sum, self._tt_sum_sq)):
+                if bool(sum_.cores) != bool(sum_sq.cores):
+                    raise RuntimeError(
+                        f'TT SUM and SUM_SQ presence differs for channel '
+                        f'{channel} in tally ID="{self.id}".')
+            self._tt_ranks = {
+                'sum': [tt.ranks for tt in self._tt_sum],
+                'sum_sq': [tt.ranks for tt in self._tt_sum_sq],
+            }
 
         self._tt_results_read = True
+
+    @property
+    def tt_sum(self):
+        """Per-channel sums, ordered by nuclide then score."""
+        self._read_tt_results()
+        return tuple(self._tt_sum)
+
+    @property
+    def tt_sum_sq(self):
+        """Per-channel sums of squares, ordered by nuclide then score."""
+        self._read_tt_results()
+        return tuple(self._tt_sum_sq)
 
     @staticmethod
     def _flat_to_tt_index(flat_index, tt_shape):
@@ -605,24 +677,33 @@ class Tally(IDManagerMixin):
 
         """
         cv.check_value('value', value, {'mean', 'std_dev', 'rel_err'})
+        cv.check_type('filter_index', filter_index, Integral)
+        cv.check_type('nuclide_index', nuclide_index, Integral)
+        cv.check_type('score_index', score_index, Integral)
         self._read_tt_results()
 
-        dense_score_index = score_index + nuclide_index * self.num_scores
-        flat_index = (
-            filter_index * (self.num_scores * self.num_nuclides) +
-            dense_score_index
-        )
-        tt_index = self._flat_to_tt_index(flat_index, self.tt_shape)
+        if filter_index < 0 or filter_index >= int(np.prod(self.tt_shape)):
+            raise IndexError('Tally filter index is out of bounds.')
+        if nuclide_index < 0 or nuclide_index >= self.num_nuclides:
+            raise IndexError('Tally nuclide index is out of bounds.')
+        if score_index < 0 or score_index >= self.num_scores:
+            raise IndexError('Tally score index is out of bounds.')
 
-        sum_ = self._tt_sum.at(tt_index)
-        sum_sq = self._tt_sum_sq.at(tt_index)
-        mean = sum_ / self._num_realizations
+        channel = nuclide_index * self.num_scores + score_index
+        tt_index = self._flat_to_tt_index(filter_index, self.tt_shape)
+        tt_sum = self._tt_sum[channel]
+        tt_sum_sq = self._tt_sum_sq[channel]
+        sum_ = tt_sum.at(tt_index)
+        sum_sq = tt_sum_sq.at(tt_index)
+        mean = (
+            sum_ / self._num_realizations
+            if self._num_realizations > 0 else 0.0)
 
         if value == 'mean':
             return mean
 
         std_dev = 0.0
-        if self._num_realizations > 1 and mean != 0.0:
+        if self._num_realizations > 1:
             variance = sum_sq / self._num_realizations - mean**2
             std_dev = sqrt(max(0.0, variance / (self._num_realizations - 1)))
 
@@ -658,6 +739,7 @@ class Tally(IDManagerMixin):
         if not self.uses_tt:
             raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
 
+        self._read_tt_results()
         filter_indices = self.get_filter_indices(filters, filter_bins)
         nuclide_indices = self.get_nuclide_indices(nuclides)
         score_indices = self.get_score_indices(scores)
@@ -1705,6 +1787,10 @@ class Tally(IDManagerMixin):
         self._higher_moments = False
         self._num_realizations = 0
         self._results_read = False
+        self._tt_sum = None
+        self._tt_sum_sq = None
+        self._tt_ranks = None
+        self._tt_results_read = False
 
     @classmethod
     def from_xml_element(cls, elem, **kwargs):

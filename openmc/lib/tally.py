@@ -57,15 +57,17 @@ _dll.openmc_tally_get_scores.errcheck = _error_handler
 _dll.openmc_tally_get_use_tt.argtypes = [c_int32, POINTER(c_bool)]
 _dll.openmc_tally_get_use_tt.restype = c_int
 _dll.openmc_tally_get_use_tt.errcheck = _error_handler
-_dll.openmc_tally_get_tt_channel_scale.argtypes = [
-    c_int32, POINTER(POINTER(c_double)), POINTER(c_int*2)]
-_dll.openmc_tally_get_tt_channel_scale.restype = c_int
-_dll.openmc_tally_get_tt_channel_scale.errcheck = _error_handler
-_dll.openmc_tally_get_tt_n_cores.argtypes = [c_int32, c_int, POINTER(c_int)]
+_dll.openmc_tally_get_tt_shape.argtypes = [
+    c_int32, POINTER(POINTER(c_int32)), POINTER(c_int)]
+_dll.openmc_tally_get_tt_shape.restype = c_int
+_dll.openmc_tally_get_tt_shape.errcheck = _error_handler
+_dll.openmc_tally_get_tt_n_cores.argtypes = [
+    c_int32, c_int, c_int, POINTER(c_int)]
 _dll.openmc_tally_get_tt_n_cores.restype = c_int
 _dll.openmc_tally_get_tt_n_cores.errcheck = _error_handler
 _dll.openmc_tally_get_tt_core.argtypes = [
-    c_int32, c_int, c_int, POINTER(POINTER(c_double)), POINTER(c_int*3)]
+    c_int32, c_int, c_int, c_int, POINTER(POINTER(c_double)),
+    POINTER(c_int*3)]
 _dll.openmc_tally_get_tt_core.restype = c_int
 _dll.openmc_tally_get_tt_core.errcheck = _error_handler
 _dll.openmc_tally_get_type.argtypes = [c_int32, POINTER(c_int32)]
@@ -102,9 +104,6 @@ _dll.openmc_tally_set_nuclides.errcheck = _error_handler
 _dll.openmc_tally_set_scores.argtypes = [c_int32, c_int, POINTER(c_char_p)]
 _dll.openmc_tally_set_scores.restype = c_int
 _dll.openmc_tally_set_scores.errcheck = _error_handler
-_dll.openmc_tally_set_tt_channel_scaling.argtypes = [c_int32, c_bool]
-_dll.openmc_tally_set_tt_channel_scaling.restype = c_int
-_dll.openmc_tally_set_tt_channel_scaling.errcheck = _error_handler
 _dll.openmc_tally_set_tt_eps.argtypes = [c_int32, c_double]
 _dll.openmc_tally_set_tt_eps.restype = c_int
 _dll.openmc_tally_set_tt_eps.errcheck = _error_handler
@@ -139,6 +138,52 @@ _ESTIMATORS = {
 _TALLY_TYPES = {
     0: 'volume', 1: 'mesh-surface', 2: 'surface', 3: 'pulse-height'
 }
+
+
+class _TTSliceReader:
+    """Cached views used to read material slices from TT tally results."""
+
+    def __init__(self, tally):
+        if not tally.uses_tt:
+            raise RuntimeError(
+                f'Tally ID="{tally.id}" is not stored in tensor-train format.')
+
+        self.tt_shape = tally.tt_shape
+        self.n_nuclides = len(tally.nuclides)
+        self.n_scores = len(tally.scores)
+        self.num_realizations = tally.num_realizations
+        self.tt_sum = tuple(tally.tt_sum)
+
+        n_channels = self.n_nuclides * self.n_scores
+        if len(self.tt_sum) != n_channels:
+            raise RuntimeError("Tensor-train channel count does not match tally.")
+        if any(tt.shape != self.tt_shape for tt in self.tt_sum):
+            raise RuntimeError("Tensor-train channel shape does not match tally.")
+
+    def get_slice(self, filter_index, score_index=None):
+        n_filter_bins = int(np.prod(self.tt_shape))
+        if filter_index < 0 or filter_index >= n_filter_bins:
+            raise IndexError("Tally filter index is out of bounds.")
+        if score_index is not None and (
+                score_index < 0 or score_index >= self.n_scores):
+            raise IndexError("Tally score index is out of bounds.")
+
+        prefix_index = _flat_to_tt_index(filter_index, self.tt_shape)
+        if score_index is None:
+            values = np.empty(self.n_nuclides * self.n_scores)
+            for channel, tt_sum in enumerate(self.tt_sum):
+                values[channel] = tt_sum._contract_slice(prefix_index)
+            values = values.reshape((self.n_nuclides, self.n_scores))
+        else:
+            values = np.empty(self.n_nuclides)
+            for i_nuclide in range(self.n_nuclides):
+                channel = i_nuclide * self.n_scores + score_index
+                values[i_nuclide] = self.tt_sum[channel]._contract_slice(
+                    prefix_index)
+
+        if self.num_realizations > 0:
+            values /= self.num_realizations
+        return values
 
 
 def global_tallies():
@@ -221,6 +266,14 @@ class Tally(_FortranObjectWithID):
         An array containing the sample standard deviation for each bin
     type : str
         Type of tally (volume, mesh_surface, surface)
+    uses_tt : bool
+        Whether accumulated results are stored in tensor-train format.
+    tt_shape : tuple of int
+        Shape of each spatial tensor-train channel.
+    tt_sum : tuple of :class:`openmc.TT`
+        Accumulated sums, ordered by nuclide then score.
+    tt_sum_sq : tuple of :class:`openmc.TT`
+        Accumulated sums of squares, ordered by nuclide then score.
 
     """
     __instances = WeakValueDictionary()
@@ -375,43 +428,42 @@ class Tally(_FortranObjectWithID):
 
     @property
     def tt_shape(self):
-        return self.tt_sum.shape
+        shape = POINTER(c_int32)()
+        n = c_int()
+        _dll.openmc_tally_get_tt_shape(self._index, shape, n)
+        return tuple(shape[i] for i in range(n.value))
 
-    def _tt(self, which):
+    def _tt(self, which, channel):
         n_cores = c_int()
-        _dll.openmc_tally_get_tt_n_cores(self._index, which, n_cores)
+        _dll.openmc_tally_get_tt_n_cores(
+            self._index, which, channel, n_cores)
         cores = []
         for i in range(n_cores.value):
             data = POINTER(c_double)()
             shape = (c_int*3)()
-            _dll.openmc_tally_get_tt_core(self._index, which, i, data, shape)
+            _dll.openmc_tally_get_tt_core(
+                self._index, which, channel, i, data, shape)
             core_shape = tuple(shape)
             cores.append(as_array(data, core_shape))
-        return TT(cores)
+        return TT(cores, shape=self.tt_shape)
 
     @property
     def tt_sum(self):
-        return self._tt(0)
+        """Tensor-train accumulated sums, ordered by nuclide then score."""
+        n_channels = len(self.nuclides) * len(self.scores)
+        return tuple(self._tt(0, channel) for channel in range(n_channels))
 
     @property
     def tt_sum_sq(self):
-        return self._tt(1)
-
-    @property
-    def tt_channel_scale(self):
-        data = POINTER(c_double)()
-        shape = (c_int*2)()
-        _dll.openmc_tally_get_tt_channel_scale(self._index, data, shape)
-        scale_shape = tuple(shape)
-        if scale_shape[0] == 0 or scale_shape[1] == 0:
-            return np.empty(scale_shape)
-        return as_array(data, scale_shape)
+        """Tensor-train accumulated sums of squares, ordered by channel."""
+        n_channels = len(self.nuclides) * len(self.scores)
+        return tuple(self._tt(1, channel) for channel in range(n_channels))
 
     @property
     def tt_ranks(self):
         return {
-            'sum': self.tt_sum.ranks,
-            'sum_sq': self.tt_sum_sq.ranks,
+            'sum': [tt.ranks for tt in self.tt_sum],
+            'sum_sq': [tt.ranks for tt in self.tt_sum_sq],
         }
 
     def tt_storage_report(self):
@@ -420,58 +472,34 @@ class Tally(_FortranObjectWithID):
 
         tt_sum = self.tt_sum
         tt_sum_sq = self.tt_sum_sq
-        dense_bytes = 2 * int(np.prod(tt_sum.shape)) * np.dtype(np.float64).itemsize
+        n_channels = len(tt_sum)
+        dense_bytes = (
+            2 * int(np.prod(self.tt_shape)) * n_channels *
+            np.dtype(np.float64).itemsize)
         tt_bytes = (
-            sum(core.size for core in tt_sum.cores) +
-            sum(core.size for core in tt_sum_sq.cores)
+            sum(core.size for tt in tt_sum for core in tt.cores) +
+            sum(core.size for tt in tt_sum_sq for core in tt.cores)
         ) * np.dtype(np.float64).itemsize
 
         return {
-            'shape': tt_sum.shape,
+            'shape': self.tt_shape,
+            'channel_count': n_channels,
             'dense_accumulated_bytes': dense_bytes,
             'tt_accumulated_bytes': tt_bytes,
             'compression_ratio': dense_bytes / tt_bytes if tt_bytes > 0 else np.inf,
-            'tt_sum_ranks': tt_sum.ranks,
-            'tt_sum_sq_ranks': tt_sum_sq.ranks,
+            'tt_sum_ranks': [tt.ranks for tt in tt_sum],
+            'tt_sum_sq_ranks': [tt.ranks for tt in tt_sum_sq],
         }
 
-    @staticmethod
-    def _tt_filter_split(tt_shape, score_size):
-        if score_size == 1:
-            return len(tt_shape)
-        product = 1
-        for i in range(len(tt_shape) - 1, -1, -1):
-            product *= tt_shape[i]
-            if product == score_size:
-                return i
-        raise RuntimeError("Tensor-train shape is incompatible with tally scores.")
-
     def get_tt_slice(self, filter_index):
-        if not self.uses_tt:
-            raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
+        """Return mean scores for all channels at one filter-bin index.
 
-        n_scores = len(self.scores)
-        n_nuclides = len(self.nuclides)
-        score_size = n_scores * n_nuclides
-        n = self.num_realizations
+        The returned array has shape ``(n_nuclides, n_scores)``.
+        """
+        return self._get_tt_slice_reader().get_slice(filter_index)
 
-        tt_sum = self.tt_sum
-        split = self._tt_filter_split(tt_sum.shape, score_size)
-        filter_shape = tt_sum.shape[:split]
-        n_filter_bins = int(np.prod(filter_shape))
-        if filter_index < 0 or filter_index >= n_filter_bins:
-            raise IndexError("Tally filter index is out of bounds.")
-
-        prefix_index = _flat_to_tt_index(filter_index, filter_shape)
-        data = tt_sum._contract_slice(prefix_index)
-        data = data.reshape((n_nuclides, n_scores))
-        scale = self.tt_channel_scale
-        if scale.size:
-            data *= scale
-        return data / n if n > 0 else data
-
-    def _set_tt_channel_scaling(self, enabled=True):
-        _dll.openmc_tally_set_tt_channel_scaling(self._index, enabled)
+    def _get_tt_slice_reader(self):
+        return _TTSliceReader(self)
 
     def set_tt_eps(self, eps):
         _dll.openmc_tally_set_tt_eps(self._index, eps)

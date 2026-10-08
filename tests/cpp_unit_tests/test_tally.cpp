@@ -1,10 +1,39 @@
 #include "openmc/tallies/tally.h"
+
+#include <algorithm>
+#include <cmath>
+
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+
+#include "openmc/message_passing.h"
 #include "openmc/settings.h"
 #include "openmc/tallies/filter_particle.h"
 
-#include <catch2/catch_test_macros.hpp>
-
 using namespace openmc;
+
+namespace {
+
+struct TallySettingsGuard {
+  bool reduce_tallies {settings::reduce_tallies};
+  int64_t n_particles {settings::n_particles};
+  int32_t gen_per_batch {settings::gen_per_batch};
+  RunMode run_mode {settings::run_mode};
+  SolverType solver_type {settings::solver_type};
+  bool master {mpi::master};
+
+  ~TallySettingsGuard()
+  {
+    settings::reduce_tallies = reduce_tallies;
+    settings::n_particles = n_particles;
+    settings::gen_per_batch = gen_per_batch;
+    settings::run_mode = run_mode;
+    settings::solver_type = solver_type;
+    mpi::master = master;
+  }
+};
+
+} // namespace
 
 TEST_CASE("Test add/set_filter")
 {
@@ -55,30 +84,4 @@ TEST_CASE("Test add/set_filter")
   REQUIRE(tally->filters().size() == 1);
   REQUIRE(model::filter_map[cell_filter->id()] == tally->filters(0));
 
-}
-
-TEST_CASE("Tensor-train tally uses explicit shape")
-{
-  settings::reduce_tallies = true;
-
-  Tally* tally = Tally::create();
-  auto* particle_filter =
-    dynamic_cast<ParticleFilter*>(Filter::create("particle"));
-  vector<ParticleType> particles {
-    ParticleType(PDG_NEUTRON), ParticleType(PDG_PHOTON)};
-  particle_filter->set_particles(particles);
-
-  std::vector<Filter*> filters {particle_filter};
-  tally->set_filters(filters);
-  tally->set_strides();
-  tally->set_scores({"fission", "absorption"});
-  tally->use_tt_ = true;
-  tally->tt_eps_ = 1.0e-3;
-  tally->tt_shape_ = {2, 2};
-
-  tally->init_results();
-
-  REQUIRE(tally->tt_shape_.size() == 2);
-  REQUIRE(tally->tt_shape_[0] == 2);
-  REQUIRE(tally->tt_shape_[1] == 2);
 }

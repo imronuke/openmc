@@ -19,7 +19,7 @@ from .reaction_rates import ReactionRates
 from .tt_depletion import (
     _get_tt_depletion_rate_write_data, _write_tt_depletion_rates)
 
-VERSION_RESULTS = (1, 3)
+VERSION_RESULTS = (1, 4)
 
 
 __all__ = ["StepResult"]

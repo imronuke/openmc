@@ -39,29 +39,24 @@ __all__ = ["CoupledOperator", "Operator", "OperatorResult"]
 _DEFAULT_TT_EPS = 1.0e-8
 
 
-def _normalize_tt_filter_shape(shape):
-    check_type('tt_opts["tt_filter_shape"]', shape, Iterable)
+def _normalize_tt_shape(shape):
+    check_type('tt_opts["tt_shape"]', shape, Iterable)
     if isinstance(shape, (str, bytes)):
         raise TypeError(
-            'tt_opts["tt_filter_shape"] must be an iterable of integers.')
+            'tt_opts["tt_shape"] must be an iterable of integers.')
 
     shape = tuple(shape)
     if not shape:
-        raise ValueError('tt_opts["tt_filter_shape"] cannot be empty.')
+        raise ValueError('tt_opts["tt_shape"] cannot be empty.')
 
     normalized_shape = []
     for dim in shape:
-        check_type('tt_opts["tt_filter_shape"] dimension', dim, Integral)
-        check_greater_than('tt_opts["tt_filter_shape"] dimension', dim, 0)
+        check_type('tt_opts["tt_shape"] dimension', dim, Integral)
+        check_greater_than('tt_opts["tt_shape"] dimension', dim, 0)
         if dim != 1:
             normalized_shape.append(int(dim))
 
-    return tuple(normalized_shape)
-
-
-def _final_tt_shape(filter_shape, n_nuclides, n_reactions):
-    shape = tuple(n for n in (*filter_shape, n_nuclides, n_reactions) if n != 1)
-    return shape if shape else (1,)
+    return tuple(normalized_shape) if normalized_shape else (1,)
 
 
 def _find_cross_sections(model: str | None = None):
@@ -187,11 +182,12 @@ class CoupledOperator(OpenMCOperator):
         .. versionadded:: 0.12.1
     tt_opts : dict, optional
         Options for tensor-train depletion reaction-rate tally accumulation.
-        If given, must include ``"tt_filter_shape"``, whose product must equal
-        the number of burnable material filter bins. Dimensions equal to one
-        are dropped before appending the nuclide and reaction axes. Optional
-        ``"tt_eps"`` sets the relative tensor-train truncation tolerance. The
-        supplied filter-shape order must match the material-filter bin order.
+        If given, must include ``"tt_shape"``, whose product must equal
+        the number of burnable material filter bins. Each nuclide-reaction
+        channel is compressed independently over this shape. Dimensions
+        equal to one are dropped. Optional ``"tt_eps"`` sets the relative
+        tensor-train truncation tolerance. The supplied shape order
+        must match the material-filter bin order.
     reduce_chain_level : int, optional
         Depth of the search when reducing the depletion chain. The default
         value of ``None`` implies no limit on the depth.
@@ -273,20 +269,19 @@ class CoupledOperator(OpenMCOperator):
         if fission_yield_opts is None:
             fission_yield_opts = {}
 
-        tt_filter_shape = None
+        tt_shape = None
         tt_eps = None
         if tt_opts is not None:
             check_type('tt_opts', tt_opts, Mapping)
-            unsupported_opts = set(tt_opts) - {'tt_filter_shape', 'tt_eps'}
+            unsupported_opts = set(tt_opts) - {'tt_shape', 'tt_eps'}
             if unsupported_opts:
                 opts = ', '.join(sorted(unsupported_opts))
                 raise ValueError(f"Unsupported tt_opts entries: {opts}")
-            if 'tt_filter_shape' not in tt_opts:
+            if 'tt_shape' not in tt_opts:
                 raise ValueError(
                     "Tensor-train reaction-rate mode requires "
-                    "tt_opts['tt_filter_shape'].")
-            tt_filter_shape = _normalize_tt_filter_shape(
-                tt_opts['tt_filter_shape'])
+                    "tt_opts['tt_shape'].")
+            tt_shape = _normalize_tt_shape(tt_opts['tt_shape'])
             tt_eps = tt_opts.get('tt_eps', _DEFAULT_TT_EPS)
             check_type('tt_opts["tt_eps"]', tt_eps, Real)
             check_greater_than('tt_opts["tt_eps"]', tt_eps, 0.0)
@@ -298,7 +293,7 @@ class CoupledOperator(OpenMCOperator):
                 raise ValueError(
                     "Tensor-train reaction-rate mode currently requires "
                     "normalization_mode='fission-q'.")
-        self._tt_depletion_used = tt_filter_shape is not None
+        self._tt_depletion_used = tt_shape is not None
         self.model = model
 
         # determine set of materials in the model
@@ -315,7 +310,7 @@ class CoupledOperator(OpenMCOperator):
             'fission_yield_mode': fission_yield_mode,
             'reaction_rate_opts': reaction_rate_opts,
             'fission_yield_opts': fission_yield_opts,
-            'tt_filter_shape': tt_filter_shape,
+            'tt_shape': tt_shape,
             'tt_eps': tt_eps,
         }
 
@@ -387,15 +382,8 @@ class CoupledOperator(OpenMCOperator):
         fission_yield_mode = helper_kwargs['fission_yield_mode']
         reaction_rate_opts = helper_kwargs['reaction_rate_opts']
         fission_yield_opts = helper_kwargs['fission_yield_opts']
-        tt_filter_shape = helper_kwargs['tt_filter_shape']
+        tt_shape = helper_kwargs['tt_shape']
         tt_eps = helper_kwargs['tt_eps']
-        tt_shape = None
-        if tt_filter_shape is not None:
-            tt_shape = _final_tt_shape(
-                tt_filter_shape,
-                self.reaction_rates.n_nuc,
-                self.reaction_rates.n_react)
-
         # Get classes to assist working with tallies
         if reaction_rate_mode == "direct":
             self._rate_helper = DirectReactionRateHelper(
