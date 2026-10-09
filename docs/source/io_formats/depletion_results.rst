@@ -4,7 +4,7 @@
 Depletion Results File Format
 =============================
 
-The current version of the depletion results file format is 1.3.
+The current version of the depletion results file format is 1.4.
 
 **/**
 
@@ -53,7 +53,10 @@ The current version of the depletion results file format is 1.3.
 **/tt_depletion_reaction_rates/**
 
 :Attributes: - **format_version** (*int*) -- Version of the tensor-train
-               depletion reaction-rate storage format.
+               depletion reaction-rate storage format. Version 2 stores
+               per-channel means and channel-to-rate indices.
+             - **tt_layout_version** (*int*) -- Tensor-train layout version.
+               Version 1 stores packed per-channel cores.
              - **stored_values** (*char[]*) -- Indicates the stored tensor-train
                values. Currently ``tally_mean``.
              - **normalization_mode** (*char[]*) -- Depletion normalization mode
@@ -66,6 +69,10 @@ The current version of the depletion results file format is 1.3.
              array has shape (number of reaction-rate nuclides, number of
              reactions). The mask is solver metadata; stored tensor-train tally
              means are not masked.
+           - **channel_indices** (*int64[n_channels][2]*) -- For each
+             tensor-train channel, the corresponding nuclide and reaction
+             indices in the reaction-rate matrix. The channel ordering
+             matches this dataset.
 
 **/tt_depletion_reaction_rates/steps/<step>/**
 
@@ -76,11 +83,26 @@ The current version of the depletion results file format is 1.3.
              reconstructed tally means to depletion reaction rates.
            - **n_realizations** (*int*) -- Number of realizations used to
              convert the raw tensor-train tally sum to a mean.
-           - **tt_shape** (*int[]*) -- Shape of the tensor-train tally.
+           - **tt_shape** (*int[]*) -- Spatial shape of each channel's
+             tensor-train. Its product equals the number of material filter
+             bins.
 
 **/tt_depletion_reaction_rates/steps/<step>/tt_mean/**
 
-:Datasets: - **n_cores** (*int*) -- Number of tensor-train cores.
-           - **core_<i>_shape** (*int[3]*) -- Shape of tensor-train core
-             ``i``.
-           - **core_<i>** (*double[]*) -- Flattened tensor-train core ``i``.
+:Datasets: - **channel_core_offsets** (*int64[]*) -- Length is one greater
+             than the number of channels. Zero-based start and end core indices
+             for each channel, with end offsets excluded.
+           - **core_shapes** (*int[]*) -- Flattened triples
+             ``(r_left, mode_size, r_right)`` for each core, in channel order.
+           - **core_data_offsets** (*int64[]*) -- Length is one greater than
+             the number of cores. Zero-based start and end offsets into
+             **core_data** for each core, with end offsets excluded.
+           - **core_data** (*double[]*) -- Concatenated row-major values for
+             every core. All-zero channels have no cores and equal adjacent
+             entries in **channel_core_offsets**.
+
+Each TT channel is one nuclide-reaction pair and uses the shared spatial
+``tt_shape``. The channel's indices in **channel_indices** map it into the
+reaction-rate matrix. The stored cores represent the tally mean; the shared
+normalization factor and material volume convert a material slice to a
+depletion reaction rate.

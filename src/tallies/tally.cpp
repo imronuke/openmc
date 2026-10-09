@@ -1852,6 +1852,35 @@ extern "C" int openmc_tally_get_tt_core(
   return 0;
 }
 
+extern "C" int openmc_tally_get_tt_storage_bytes(
+  int32_t index, std::size_t* sum_bytes, std::size_t* sum_sq_bytes)
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+  if (sum_bytes == nullptr || sum_sq_bytes == nullptr) {
+    set_errmsg("Tensor-train storage output pointer is null.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  const auto& tally = model::tallies[index];
+  if (!tally->use_tt_) {
+    set_errmsg("Tally is not stored in tensor-train format.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  *sum_bytes = 0;
+  for (const auto& tt : tally->tt_sum_)
+    *sum_bytes += tt_storage_bytes(tt);
+
+  *sum_sq_bytes = 0;
+  for (const auto& tt : tally->tt_sum_sq_)
+    *sum_sq_bytes += tt_storage_bytes(tt);
+
+  return 0;
+}
+
 extern "C" int openmc_tally_set_nuclides(
   int32_t index, int n, const char** nuclides)
 {

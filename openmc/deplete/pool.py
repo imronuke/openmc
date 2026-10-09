@@ -2,7 +2,7 @@
 
 Provided to avoid some circular imports
 """
-from itertools import repeat, starmap
+from itertools import islice, repeat, starmap
 from multiprocessing import Pool
 
 import numpy as np
@@ -18,6 +18,7 @@ USE_MULTIPROCESSING = True
 # Allow user to override the number of worker processes to use for depletion
 # calculations
 NUM_PROCESSES = None
+
 
 def _distribute(items):
     """Distribute items across MPI communicator
@@ -40,6 +41,48 @@ def _distribute(items):
         if comm.rank == i:
             return items[j:j + chunk_size]
         j += chunk_size
+
+
+def _solve_matrices(func, inputs, batch_size=None, parallel=True):
+    """Apply a depletion solver to material matrices.
+
+    Parameters
+    ----------
+    func : callable
+        Depletion solver accepting a matrix, composition, time interval, and
+        substep count.
+    inputs : iterable
+        Tuples of arguments for ``func``.
+    batch_size : int, optional
+        Maximum number of prepared material matrices held while submitting
+        work to worker processes. If omitted, all inputs are submitted at once.
+    parallel : bool, optional
+        Whether to use multiprocessing when it is enabled globally.
+
+    Returns
+    -------
+    list of numpy.ndarray
+        Depleted compositions in input order.
+    """
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError("Solver batch size must be positive.")
+
+    if USE_MULTIPROCESSING and parallel:
+        results = []
+        with Pool(NUM_PROCESSES) as pool:
+            if batch_size is None:
+                return list(pool.starmap(func, inputs))
+
+            inputs = iter(inputs)
+            while True:
+                batch = list(islice(inputs, batch_size))
+                if not batch:
+                    break
+                results.extend(pool.starmap(func, batch))
+        return results
+
+    return list(starmap(func, inputs))
+
 
 def deplete(func, chain, n, rates, dt, current_timestep=None, matrix_func=None,
             transfer_rates=None, external_source_rates=None, substeps=1,
@@ -202,12 +245,7 @@ def deplete(func, chain, n, rates, dt, current_timestep=None, matrix_func=None,
                 n[i] = np.append(n[i], 1.0)
 
     inputs = zip(matrices, n, repeat(dt), repeat(substeps))
-
-    if USE_MULTIPROCESSING:
-        with Pool(NUM_PROCESSES) as pool:
-            n_result = list(pool.starmap(func, inputs))
-    else:
-        n_result = list(starmap(func, inputs))
+    n_result = _solve_matrices(func, inputs)
 
     # Remove extra value at the end of the nuclide vectors
     if (external_source_rates is not None and

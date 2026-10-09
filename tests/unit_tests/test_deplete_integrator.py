@@ -484,6 +484,8 @@ def test_predictor_tt_depletes_material_slices(monkeypatch):
             return obj
 
     class Chain:
+        reactions = ['rx']
+
         def __init__(self):
             self.fission_yields = [{'mat': '1'}, {'mat': '2'}]
             self.seen_yields = []
@@ -508,6 +510,9 @@ def test_predictor_tt_depletes_material_slices(monkeypatch):
     op.heavy_metal = 1.0
     op.local_mats = ['1', '2']
     op._tt_depletion_used = True
+    op.reaction_rates = ReactionRates(op.local_mats, ['1', '2'], ['rx'])
+    op._rate_helper = SimpleNamespace(nuclides=['1', '2'])
+    op._tt_reaction_rate_mask = np.ones((2, 1), dtype=bool)
     n = [np.array([0.0, 0.0]), np.array([0.0, 0.0])]
     rate_calls = []
 
@@ -519,8 +524,9 @@ def test_predictor_tt_depletes_material_slices(monkeypatch):
 
     monkeypatch.setattr(
         'openmc.deplete.tt_depletion._get_tt_reaction_rates',
-        lambda operator, mat, normalization_factor:
+        lambda operator, mat, normalization_factor, *args:
             get_tt_reaction_rates(mat, normalization_factor))
+    monkeypatch.setattr(pool, 'USE_MULTIPROCESSING', False)
     integrator = PredictorIntegrator(op, [1], power=1, solver=solver)
 
     _, result = integrator(
@@ -542,6 +548,7 @@ def test_predictor_tt_uses_dense_atom_numbers(monkeypatch):
 
     class Chain:
         fission_yields = [None]
+        reactions = ['rx']
 
         @staticmethod
         def form_matrix(rates, fission_yields=None):
@@ -560,6 +567,9 @@ def test_predictor_tt_uses_dense_atom_numbers(monkeypatch):
     op.heavy_metal = 1.0
     op.local_mats = ['1', '2']
     op._tt_depletion_used = True
+    op.reaction_rates = ReactionRates(op.local_mats, ['1', '2'], ['rx'])
+    op._rate_helper = SimpleNamespace(nuclides=['1', '2'])
+    op._tt_reaction_rate_mask = np.ones((2, 1), dtype=bool)
     n = [np.array([10.0, 20.0]), np.array([30.0, 40.0])]
 
     def get_tt_reaction_rates(mat, normalization_factor):
@@ -569,8 +579,9 @@ def test_predictor_tt_uses_dense_atom_numbers(monkeypatch):
 
     monkeypatch.setattr(
         'openmc.deplete.tt_depletion._get_tt_reaction_rates',
-        lambda operator, mat, normalization_factor:
+        lambda operator, mat, normalization_factor, *args:
             get_tt_reaction_rates(mat, normalization_factor))
+    monkeypatch.setattr(pool, 'USE_MULTIPROCESSING', False)
     integrator = PredictorIntegrator(op, [1], power=1, solver=solver)
 
     _, result = integrator(
@@ -607,6 +618,7 @@ def test_predictor_tt_zero_source_uses_zero_rates(monkeypatch):
     monkeypatch.setattr(
         'openmc.deplete.tt_depletion._get_tt_reaction_rates',
         lambda *args: pytest.fail("TT rates should not be reconstructed"))
+    monkeypatch.setattr(pool, 'USE_MULTIPROCESSING', False)
 
     integrator = PredictorIntegrator(op, [1], power=1, solver=solver)
     rates = _TTReactionRates(0.0, zero_source=True)

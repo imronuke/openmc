@@ -48,6 +48,10 @@ class _FakeTally:
         self.calls[name] += 1
         return metadata[name]
 
+    def _tt(self, which, channel):
+        self.calls['tt_channel'] += 1
+        return self.metadata['tt_sum'][channel]
+
     def __setattr__(self, name, value):
         metadata = self.__dict__.get('metadata', {})
         if name in metadata:
@@ -104,7 +108,8 @@ def test_tt_helper_reorders_and_scatter_fills_rates(rate_helper, tally_values):
             rates, _expected_rates(tally_values, material, 2,
                                    nuclides, reactions))
     assert tally.calls['reader'] == 1
-    assert tally.calls['tt_sum'] == 1
+    assert tally.calls['tt_sum'] == 0
+    assert tally.calls['tt_channel'] == 6
     assert tally.calls['mean'] == 0
 
 
@@ -138,7 +143,8 @@ def test_tt_helper_reset_fetches_new_transport_results(
     rates = rate_helper.get_material_rates(0, [3, 0, 4], [2, 0])
     np.testing.assert_allclose(rates, old * 6 / 5)
     assert tally.calls['reader'] == 2
-    assert tally.calls['tt_sum'] == 2
+    assert tally.calls['tt_sum'] == 0
+    assert tally.calls['tt_channel'] == 12
     assert tally.calls['num_realizations'] == 2
 
 
@@ -182,6 +188,19 @@ def test_tt_helper_releases_views_before_generating_tallies(
     expected = _expected_rates(4 * tally_values, 0, 2, [3, 0, 4], [2, 0])
     np.testing.assert_array_equal(actual, expected)
     assert replacement.calls['reader'] == 1
+
+
+def test_tt_helper_extracts_only_selected_channels(rate_helper, tally_values):
+    tally = _FakeTally(tally_values)
+    rate_helper._rate_tally = tally
+
+    actual = rate_helper.get_material_rates(
+        1, [3, 0, 4], [2, 0], tally_channel_indices=[0, 3])
+    expected = np.zeros((5, 4))
+    expected[3, 2] = tally_values[1, 0, 0] / 2
+    expected[0, 0] = tally_values[1, 1, 1] / 2
+    np.testing.assert_array_equal(actual, expected)
+    assert tally.calls['tt_channel'] == 2
 
 
 def test_dense_helper_preserves_values_and_mean_cache(rate_helper, tally_values):

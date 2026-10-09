@@ -1,5 +1,6 @@
 from collections.abc import Mapping
-from ctypes import c_int, c_int32, c_size_t, c_double, c_char_p, c_bool, POINTER
+from ctypes import (
+    byref, c_int, c_int32, c_size_t, c_double, c_char_p, c_bool, POINTER)
 from weakref import WeakValueDictionary
 
 import numpy as np
@@ -70,6 +71,10 @@ _dll.openmc_tally_get_tt_core.argtypes = [
     POINTER(c_int*3)]
 _dll.openmc_tally_get_tt_core.restype = c_int
 _dll.openmc_tally_get_tt_core.errcheck = _error_handler
+_dll.openmc_tally_get_tt_storage_bytes.argtypes = [
+    c_int32, POINTER(c_size_t), POINTER(c_size_t)]
+_dll.openmc_tally_get_tt_storage_bytes.restype = c_int
+_dll.openmc_tally_get_tt_storage_bytes.errcheck = _error_handler
 _dll.openmc_tally_get_type.argtypes = [c_int32, POINTER(c_int32)]
 _dll.openmc_tally_get_type.restype = c_int
 _dll.openmc_tally_get_type.errcheck = _error_handler
@@ -152,33 +157,55 @@ class _TTSliceReader:
         self.n_nuclides = len(tally.nuclides)
         self.n_scores = len(tally.scores)
         self.num_realizations = tally.num_realizations
-        self.tt_sum = tuple(tally.tt_sum)
+        self._tally = tally
 
         n_channels = self.n_nuclides * self.n_scores
-        if len(self.tt_sum) != n_channels:
-            raise RuntimeError("Tensor-train channel count does not match tally.")
-        if any(tt.shape != self.tt_shape for tt in self.tt_sum):
-            raise RuntimeError("Tensor-train channel shape does not match tally.")
+        self._tt_sum = [None] * n_channels
 
-    def get_slice(self, filter_index, score_index=None):
+    def _get_tt_sum(self, channel):
+        tt = self._tt_sum[channel]
+        if tt is None:
+            tt = self._tally._tt(0, channel)
+            if tt.shape != self.tt_shape:
+                raise RuntimeError(
+                    "Tensor-train channel shape does not match tally.")
+            self._tt_sum[channel] = tt
+        return tt
+
+    def get_slice(
+            self, filter_index, score_index=None, channel_indices=None):
         n_filter_bins = int(np.prod(self.tt_shape))
         if filter_index < 0 or filter_index >= n_filter_bins:
             raise IndexError("Tally filter index is out of bounds.")
+        if score_index is not None and channel_indices is not None:
+            raise ValueError(
+                "Specify either a tally score or channel indices, not both.")
         if score_index is not None and (
                 score_index < 0 or score_index >= self.n_scores):
             raise IndexError("Tally score index is out of bounds.")
 
         prefix_index = _flat_to_tt_index(filter_index, self.tt_shape)
         if score_index is None:
-            values = np.empty(self.n_nuclides * self.n_scores)
-            for channel, tt_sum in enumerate(self.tt_sum):
-                values[channel] = tt_sum._contract_slice(prefix_index)
-            values = values.reshape((self.n_nuclides, self.n_scores))
+            if channel_indices is None:
+                selected_channels = range(self.n_nuclides * self.n_scores)
+            else:
+                selected_channels = tuple(
+                    int(channel) for channel in channel_indices)
+                if any(channel < 0 or
+                       channel >= self.n_nuclides * self.n_scores
+                       for channel in selected_channels):
+                    raise IndexError("Tally channel index is out of bounds.")
+            values = np.empty(len(selected_channels))
+            for i, channel in enumerate(selected_channels):
+                values[i] = self._get_tt_sum(channel)._contract_slice(
+                    prefix_index)
+            if channel_indices is None:
+                values = values.reshape((self.n_nuclides, self.n_scores))
         else:
             values = np.empty(self.n_nuclides)
             for i_nuclide in range(self.n_nuclides):
                 channel = i_nuclide * self.n_scores + score_index
-                values[i_nuclide] = self.tt_sum[channel]._contract_slice(
+                values[i_nuclide] = self._get_tt_sum(channel)._contract_slice(
                     prefix_index)
 
         if self.num_realizations > 0:
@@ -470,16 +497,14 @@ class Tally(_FortranObjectWithID):
         if not self.uses_tt:
             raise RuntimeError(f'Tally ID="{self.id}" is not stored in tensor-train format.')
 
+        sum_bytes, sum_sq_bytes = self._tt_storage_bytes()
         tt_sum = self.tt_sum
         tt_sum_sq = self.tt_sum_sq
         n_channels = len(tt_sum)
         dense_bytes = (
             2 * int(np.prod(self.tt_shape)) * n_channels *
             np.dtype(np.float64).itemsize)
-        tt_bytes = (
-            sum(core.size for tt in tt_sum for core in tt.cores) +
-            sum(core.size for tt in tt_sum_sq for core in tt.cores)
-        ) * np.dtype(np.float64).itemsize
+        tt_bytes = sum_bytes + sum_sq_bytes
 
         return {
             'shape': self.tt_shape,
@@ -490,6 +515,13 @@ class Tally(_FortranObjectWithID):
             'tt_sum_ranks': [tt.ranks for tt in tt_sum],
             'tt_sum_sq_ranks': [tt.ranks for tt in tt_sum_sq],
         }
+
+    def _tt_storage_bytes(self):
+        sum_bytes = c_size_t()
+        sum_sq_bytes = c_size_t()
+        _dll.openmc_tally_get_tt_storage_bytes(
+            self._index, byref(sum_bytes), byref(sum_sq_bytes))
+        return sum_bytes.value, sum_sq_bytes.value
 
     def get_tt_slice(self, filter_index):
         """Return mean scores for all channels at one filter-bin index.

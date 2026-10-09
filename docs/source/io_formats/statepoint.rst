@@ -4,7 +4,7 @@
 State Point File Format
 =======================
 
-The current version of the statepoint file format is 18.3.
+The current version of the statepoint file format is 18.4.
 
 **/**
 
@@ -151,6 +151,10 @@ The current version of the statepoint file format is 18.3.
                rates should be multiplied by atom density (1) or not (0).
              - **higher_moments** (*int*) -- Flag indicating whether
                higher-order tally moments are enabled (1) or not (0).
+             - **tt_enabled** (*int*) -- Present for tensor-train tallies and
+               set to 1.
+             - **tt_layout_version** (*int*) -- Tensor-train layout version.
+               Version 1 stores each tally result as packed per-channel cores.
 
 :Datasets: - **n_realizations** (*int*) -- Number of realizations.
            - **n_filters** (*int*) -- Number of filters used.
@@ -164,11 +168,47 @@ The current version of the statepoint file format is 18.3.
            - **n_score_bins** (*int*) -- Number of scoring bins for a single
              nuclide.
            - **score_bins** (*char[][]*) -- Values of specified scores.
-           - **results** (*double[][][2]*) -- Accumulated sum and sum-of-squares
-             for each bin of the i-th tally. The first dimension represents
-             combinations of filter bins, the second dimensions represents
-             scoring bins, and the third dimension has two entries for the sum
-             and the sum-of-squares.
+           - **results** (*double[][][2]*) -- For a dense tally, accumulated
+             sum and sum-of-squares for each bin. The first dimension
+             represents combinations of filter bins, the second represents
+             scoring bins, and the third has entries for the sum and the
+             sum-of-squares. Tensor-train tallies store their results in
+             **tt_sum** and **tt_sum_sq** instead.
+           - **tt_eps** (*double*) -- Relative truncation tolerance used for
+             tensor-train accumulation, applied independently to each channel
+             for both sum and sum-of-squares. Present only for tensor-train
+             tallies.
+           - **tt_shape** (*int[]*) -- Shape of the filter-bin tensor shared by
+             all tensor-train channels. Its product equals the number of tally
+             filter bins.
+
+**/tallies/tally <uid>/tt_sum/** and **/tallies/tally <uid>/tt_sum_sq/**
+
+These groups contain the accumulated sum and sum-of-squares tensor trains,
+respectively. Both groups use the same packed layout. The realization count is
+stored once in the containing tally group and applies to every channel.
+
+:Datasets: - **channel_core_offsets** (*int64[]*) -- Length is one greater
+             than the number of nuclide-score channels. Zero-based entries give
+             the start and end core indices for each channel, with the end
+             offset excluded. Empty channels, which represent all-zero tensors,
+             have equal adjacent offsets.
+           - **core_shapes** (*int[]*) -- Flattened triples
+             ``(r_left, mode_size, r_right)`` for each core, in core order.
+             The number of cores is one less than the length of
+             **core_data_offsets**.
+           - **core_data_offsets** (*int64[]*) -- Zero-based start and end
+             offsets in **core_data** for each core, with the end offset
+             excluded. The first offset is zero and the final offset is the
+             number of elements in **core_data**.
+           - **core_data** (*double[]*) -- Concatenated row-major values for
+             every core.
+
+Channels are ordered with nuclide as the outer index and score as the inner
+index: ``channel = nuclide_index * n_score_bins + score_index``. Each channel's
+``SUM`` and ``SUM_SQ`` have independent cores but share the spatial
+``tt_shape``. The **tt_layout_version** attribute on the tally group applies to
+both packed groups; version 1 uses the datasets and offsets described here.
 
 **/runtime/**
 

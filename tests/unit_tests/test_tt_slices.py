@@ -32,6 +32,10 @@ class _FakeTally:
         self.calls[name] += 1
         return self.metadata[name]
 
+    def _tt(self, which, channel):
+        self.calls['tt_channel'] += 1
+        return self.metadata['tt_sum'][channel]
+
     def _get_tt_slice_reader(self):
         return Tally._get_tt_slice_reader(self)
 
@@ -111,8 +115,10 @@ def test_tt_slice_reader_matches_dense(shape, n_nuclides, n_scores,
     reader.get_slice(0)
     reader.get_slice(0, 0)
     for name in ('uses_tt', 'tt_shape', 'scores', 'nuclides',
-                 'num_realizations', 'tt_sum'):
+                 'num_realizations'):
         assert tally.calls[name] == 1
+    assert tally.calls['tt_channel'] == n_channels
+    assert tally.calls['tt_sum'] == 0
     for tt, channel_cores in zip(channels, originals):
         for core, original in zip(tt.cores, channel_cores):
             np.testing.assert_array_equal(core, original)
@@ -157,7 +163,7 @@ def test_tt_slice_reader_rejects_incompatible_shape():
     tally = _FakeTally(_make_channels((2, 5), 6), 2, 3, 3,
                         tt_shape=(2, 4))
     with pytest.raises(RuntimeError, match='shape'):
-        Tally._get_tt_slice_reader(tally)
+        Tally._get_tt_slice_reader(tally).get_slice(0)
 
 
 def test_tt_slice_reader_refreshes_tally_state_between_cycles():

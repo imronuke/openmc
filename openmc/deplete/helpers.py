@@ -223,7 +223,9 @@ class DirectReactionRateHelper(ReactionRateHelper):
         self._rate_tally_means_cache = None
         self._tt_slice_reader = None
 
-    def get_material_rates(self, mat_index, nuc_index, rx_index):
+    def get_material_rates(
+            self, mat_index, nuc_index, rx_index, tally_score_index=None,
+            tally_channel_indices=None):
         """Return an array of reaction rates for a material
 
         Parameters
@@ -235,6 +237,12 @@ class DirectReactionRateHelper(ReactionRateHelper):
             desired reaction rate matrix
         rx_index : iterable of int
             Index for each reaction scored in the tally
+        tally_score_index : int, optional
+            If provided, only extract the score at this index in the tally.
+            This option is only supported for tensor-train tallies.
+        tally_channel_indices : iterable of int, optional
+            If provided, only extract these flattened nuclide-score channels.
+            This option is only supported for tensor-train tallies.
 
         Returns
         -------
@@ -244,15 +252,41 @@ class DirectReactionRateHelper(ReactionRateHelper):
         """
         self._results_cache.fill(0.0)
         if self._rate_tally.uses_tt:
+            if (tally_score_index is not None and
+                    tally_channel_indices is not None):
+                raise ValueError(
+                    "Specify either a tally score or channel indices, "
+                    "not both.")
+            if tally_channel_indices is not None:
+                tally_channel_indices = tuple(
+                    int(channel) for channel in tally_channel_indices)
             if self._tt_slice_reader is None:
                 self._tt_slice_reader = (
                     self._rate_tally._get_tt_slice_reader())
-            rate_slice = self._tt_slice_reader.get_slice(mat_index)
-            for i_tally_nuc, i_nuc in enumerate(nuc_index):
-                for i_tally_rx, i_rx in enumerate(rx_index):
-                    self._results_cache[i_nuc, i_rx] = (
-                        rate_slice[i_tally_nuc, i_tally_rx])
+            rate_slice = self._tt_slice_reader.get_slice(
+                mat_index, tally_score_index, tally_channel_indices)
+            if tally_channel_indices is not None:
+                n_scores = len(rx_index)
+                for channel, value in zip(tally_channel_indices, rate_slice):
+                    i_tally_nuc, i_tally_rx = divmod(channel, n_scores)
+                    self._results_cache[
+                        nuc_index[i_tally_nuc], rx_index[i_tally_rx]] = value
+            elif tally_score_index is None:
+                for i_tally_nuc, i_nuc in enumerate(nuc_index):
+                    for i_tally_rx, i_rx in enumerate(rx_index):
+                        self._results_cache[i_nuc, i_rx] = (
+                            rate_slice[i_tally_nuc, i_tally_rx])
+            else:
+                i_rx = rx_index[tally_score_index]
+                for i_tally_nuc, i_nuc in enumerate(nuc_index):
+                    self._results_cache[i_nuc, i_rx] = rate_slice[i_tally_nuc]
             return self._results_cache
+
+        if (tally_score_index is not None or
+                tally_channel_indices is not None):
+            raise ValueError(
+                "Selective score extraction is only supported for "
+                "tensor-train tallies.")
 
         full_tally_res = self.rate_tally_means[mat_index]
         for i_tally, (i_nuc, i_rx) in enumerate(product(nuc_index, rx_index)):

@@ -10,6 +10,7 @@ import numpy as np
 from openmc.tt import (
     TT, _TT_LAYOUT_VERSION, _flat_to_tt_index, _write_packed_tt_channels)
 
+from .pool import _solve_matrices
 from .reaction_rates import ReactionRates
 
 
@@ -348,6 +349,8 @@ def _prepare_tt_reaction_rates(operator, source_rate):
     fission_yields = []
     number = np.zeros(rates.n_nuc)
     fission_rates = np.empty(rates.n_nuc) if fission_ind is not None else None
+    fission_tally_index = (
+        rx_ind.index(fission_ind) if fission_ind is not None else None)
 
     for i, mat in enumerate(operator.local_mats):
         mat_index = operator._mat_index_map[mat]
@@ -355,11 +358,12 @@ def _prepare_tt_reaction_rates(operator, source_rate):
         for nuc, i_nuc_results in zip(rxn_nuclides, nuc_ind):
             number[i_nuc_results] = operator.number[mat, nuc]
 
-        tally_rates = operator._rate_helper.get_material_rates(
-            mat_index, nuc_ind, rx_ind)
         fission_yields.append(operator._yield_helper.weighted_yields(i))
 
         if fission_ind is not None:
+            tally_rates = operator._rate_helper.get_material_rates(
+                mat_index, nuc_ind, rx_ind,
+                tally_score_index=fission_tally_index)
             volume_b_cm = 1e24 * operator.number.get_mat_volume(mat)
             np.multiply(number, 1.0 / volume_b_cm, out=fission_rates)
             np.multiply(
@@ -374,15 +378,17 @@ def _prepare_tt_reaction_rates(operator, source_rate):
     return operator._normalization_helper.factor(source_rate)
 
 
-def _get_tt_reaction_rates(operator, mat, normalization_factor):
+def _get_tt_reaction_rates(
+        operator, mat, normalization_factor, nuc_ind, rx_ind,
+        tally_channel_indices):
     """Return normalized TT reaction rates for one material."""
     rates = operator.reaction_rates
-    _, nuc_ind, rx_ind = _tt_rate_indices(operator)
     mat = str(mat)
     mat_index = operator._mat_index_map[mat]
 
     tally_rates = operator._rate_helper.get_material_rates(
-        mat_index, nuc_ind, rx_ind)
+        mat_index, nuc_ind, rx_ind,
+        tally_channel_indices=tally_channel_indices)
     material_rates = rates[0].copy()
     volume_b_cm = 1e24 * operator.number.get_mat_volume(mat)
     np.multiply(
@@ -425,24 +431,40 @@ def timed_tt_deplete(
             "equal to the number of compositions {}".format(
                 len(fission_yields), len(n)))
 
-    results = []
-    zero_rates = None
-    reaction_rate_mask = getattr(rates, 'reaction_rate_mask', None)
-    if reaction_rate_mask is not None:
-        operator._tt_reaction_rate_mask = reaction_rate_mask
     if getattr(rates, 'zero_source', False):
         zero_rates = operator.reaction_rates[0].copy()
         zero_rates.fill(0.0)
+        nuc_ind = rx_ind = active_tally_channels = None
+    else:
+        zero_rates = None
+        reaction_rate_mask = getattr(rates, 'reaction_rate_mask', None)
+        if reaction_rate_mask is None:
+            reaction_rate_mask = vars(operator).get(
+                '_tt_reaction_rate_mask')
+        if reaction_rate_mask is None:
+            reaction_rate_mask = _tt_reaction_rate_mask(
+                chain, operator.reaction_rates)
+        operator._tt_reaction_rate_mask = reaction_rate_mask
+        _, nuc_ind, rx_ind = _tt_rate_indices(operator)
+        active_tally_channels = np.flatnonzero(
+            reaction_rate_mask[np.ix_(nuc_ind, rx_ind)].ravel()).tolist()
 
-    for mat, n_mat, yields in zip(operator.local_mats, n, fission_yields):
-        if zero_rates is None:
-            mat_rates = _get_tt_reaction_rates(
-                operator, mat, rates.normalization_factor)
-        else:
-            mat_rates = zero_rates
-        matrix = chain.form_matrix(mat_rates, yields)
-        n_result = solver(matrix, n_mat, dt, substeps)
+    def material_inputs():
+        for mat, n_mat, yields in zip(
+                operator.local_mats, n, fission_yields):
+            if zero_rates is None:
+                mat_rates = _get_tt_reaction_rates(
+                    operator, mat, rates.normalization_factor, nuc_ind,
+                    rx_ind, active_tally_channels)
+            else:
+                mat_rates = zero_rates
+            matrix = chain.form_matrix(mat_rates, yields)
+            yield matrix, n_mat, dt, substeps
+
+    n_results = _solve_matrices(
+        solver, material_inputs(), batch_size=128,
+        parallel=len(operator.local_mats) > 1)
+    for n_result in n_results:
         n_result.clip(min=0.0, out=n_result)
-        results.append(n_result)
 
-    return time.time() - start, results
+    return time.time() - start, n_results

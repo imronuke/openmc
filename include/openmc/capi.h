@@ -225,6 +225,8 @@ int openmc_tally_get_tt_n_cores(
 int openmc_tally_get_tt_core(
   int32_t index, int which, int channel, int core_index,
   const double** data, int shape[3]);
+int openmc_tally_get_tt_storage_bytes(
+  int32_t index, size_t* sum_bytes, size_t* sum_sq_bytes);
 int openmc_tally_get_type(int32_t index, int32_t* type);
 int openmc_tally_get_writable(int32_t index, bool* writable);
 int openmc_tally_reset(int32_t index);

@@ -98,13 +98,19 @@ def test_tt_material_rate_helpers():
         def __init__(self, rates):
             self.rates = rates
             self.reset = False
+            self.score_indices = []
+            self.channel_indices = []
 
         def reset_tally_means(self):
             self.reset = True
 
-        def get_material_rates(self, mat_index, nuc_ind, rx_ind):
+        def get_material_rates(
+                self, mat_index, nuc_ind, rx_ind, tally_score_index=None,
+                tally_channel_indices=None):
             assert nuc_ind == [0, 1]
             assert rx_ind == [0, 1]
+            self.score_indices.append(tally_score_index)
+            self.channel_indices.append(tally_channel_indices)
             return self.rates[mat_index]
 
     class FakeNormalizationHelper:
@@ -170,6 +176,7 @@ def test_tt_material_rate_helpers():
     normalization_factor = _prepare_tt_reaction_rates(op, 24.0)
 
     assert op._rate_helper.reset
+    assert op._rate_helper.score_indices == [0, 0]
     assert op._yield_helper.unpacked
     assert normalization_factor == pytest.approx(2.0)
     assert op.chain.fission_yields == [{'mat': 0}, {'mat': 1}]
@@ -181,7 +188,9 @@ def test_tt_material_rate_helpers():
     np.testing.assert_allclose(
         op._normalization_helper.updates[1], [2.0, 3.0, 0.0])
 
-    material_rates = _get_tt_reaction_rates(op, '1', normalization_factor)
+    material_rates = _get_tt_reaction_rates(
+        op, '1', normalization_factor, [0, 1], [0, 1], [0, 1, 2])
+    assert op._rate_helper.channel_indices[-1] == [0, 1, 2]
 
     assert material_rates.shape == (3, 2)
     assert material_rates.index_nuc == op.reaction_rates.index_nuc

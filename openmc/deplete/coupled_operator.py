@@ -535,9 +535,12 @@ class CoupledOperator(OpenMCOperator):
         if comm.rank != 0:
             return
 
-        report = self._rate_helper._rate_tally.tt_storage_report()
-        dense_bytes = report['dense_accumulated_bytes']
-        tt_bytes = report['tt_accumulated_bytes']
+        tally = self._rate_helper._rate_tally
+        n_channels = len(tally.nuclides) * len(tally.scores)
+        dense_bytes = (
+            2 * int(np.prod(tally.tt_shape)) * n_channels *
+            np.dtype(np.float64).itemsize)
+        tt_bytes = sum(tally._tt_storage_bytes())
 
         print("Tensor-train reaction-rate tally accumulated storage:")
         print(f"  dense accumulated storage        {dense_bytes} bytes")
