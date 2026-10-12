@@ -1032,84 +1032,6 @@ void Tally::accumulate()
   }
 }
 
-void Tally::write_tt_storage_report() const
-{
-  if (!use_tt_)
-    return;
-
-  int n_scores = scores_.size() * nuclides_.size();
-  auto dense_accumulated_bytes =
-    static_cast<std::size_t>(2) * n_filter_bins_ * n_scores * sizeof(double);
-  std::size_t tt_sum_bytes = 0;
-  std::size_t tt_sum_sq_bytes = 0;
-  for (int channel = 0; channel < n_scores; ++channel) {
-    tt_sum_bytes += tt_storage_bytes(tt_sum_[channel]);
-    tt_sum_sq_bytes += tt_storage_bytes(tt_sum_sq_[channel]);
-  }
-  auto tt_accumulated_bytes = tt_sum_bytes + tt_sum_sq_bytes;
-
-  std::string ratio = "inf";
-  if (tt_accumulated_bytes > 0) {
-    ratio = fmt::format("{:.6g}",
-      static_cast<double>(dense_accumulated_bytes) / tt_accumulated_bytes);
-  }
-
-  write_message(
-    5, "Tally {} tensor-train accumulated storage:", id_);
-  write_message(5, "  dense accumulated storage        {} bytes",
-    dense_accumulated_bytes);
-  write_message(5, "  TT accumulated storage           {} bytes",
-    tt_accumulated_bytes);
-  write_message(5, "  TT SUM storage                   {} bytes", tt_sum_bytes);
-  write_message(5, "  TT SUM_SQ storage                {} bytes", tt_sum_sq_bytes);
-  write_message(5, "  accumulated compression ratio    {}", ratio);
-}
-
-void Tally::reconstruct_tt_results()
-{
-  if (!use_tt_)
-    return;
-
-  int n_channels = scores_.size() * nuclides_.size();
-  if (tt_sum_.size() != static_cast<std::size_t>(n_channels) ||
-      tt_sum_sq_.size() != static_cast<std::size_t>(n_channels)) {
-    fatal_error("Tensor-train channel storage shape mismatch.");
-  }
-
-  write_tt_storage_report();
-  write_message(
-    5, "Reconstructing per-channel tensor-train results for tally {}", id_);
-
-  results_ = tensor::Tensor<double>({static_cast<size_t>(n_filter_bins_),
-    static_cast<size_t>(n_channels), size_t {3}});
-  results_.fill(0.0);
-
-  for (int channel = 0; channel < n_channels; ++channel) {
-    if (tt_sum_[channel].cores.empty() &&
-        tt_sum_sq_[channel].cores.empty()) {
-      continue;
-    }
-
-    if (tt_sum_[channel].cores.empty() ||
-        tt_sum_sq_[channel].cores.empty()) {
-      fatal_error("Tensor-train SUM and SUM_SQ channel presence mismatch.");
-    }
-
-    auto [sum, sum_shape] = tt_sum_[channel].full();
-    auto [sum_sq, sum_sq_shape] = tt_sum_sq_[channel].full();
-    if (sum_shape != tt_shape_ || sum_sq_shape != tt_shape_ ||
-        sum.size() != static_cast<std::size_t>(n_filter_bins_) ||
-        sum_sq.size() != static_cast<std::size_t>(n_filter_bins_)) {
-      fatal_error("Tensor-train tally result shape mismatch.");
-    }
-
-    for (int i = 0; i < n_filter_bins_; ++i) {
-      results_(i, channel, TallyResult::SUM) = sum[i];
-      results_(i, channel, TallyResult::SUM_SQ) = sum_sq[i];
-    }
-  }
-}
-
 int Tally::score_index(const std::string& score) const
 {
   for (int i = 0; i < scores_.size(); i++) {
@@ -1333,13 +1255,6 @@ void accumulate_tallies()
   for (int i_tally : model::active_tallies) {
     auto& tally {model::tallies[i_tally]};
     tally->accumulate();
-  }
-}
-
-void reconstruct_tally_tt_results()
-{
-  for (auto& tally : model::tallies) {
-    tally->reconstruct_tt_results();
   }
 }
 

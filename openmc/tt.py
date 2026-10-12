@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from math import prod
 
-import h5py
 import numpy as np
 
 
@@ -188,31 +187,12 @@ class TT:
         return (self.cores[0].shape[0],) + tuple(core.shape[2] for core in self.cores)
 
     @classmethod
-    def from_hdf5(cls, group: h5py.Group, shape=None):
-        """Read a tensor train from an HDF5 group.
-
-        Parameters
-        ----------
-        group : h5py.Group
-            Group containing the tensor-train cores.
-        shape : iterable of int, optional
-            Logical tensor shape, required for an empty all-zero tensor train.
-        """
-        n_cores = int(group["n_cores"][()])
-        cores = []
-        for i in range(n_cores):
-            core_shape = tuple(int(x) for x in group[f"core_{i}_shape"][()])
-            data = group[f"core_{i}"][()]
-            cores.append(data.reshape(core_shape))
-        return cls(cores, shape=shape)
-
-    @classmethod
     def from_hdf5_channels(cls, group, shape, n_channels):
         """Read all channels from the packed TT HDF5 representation.
 
         Parameters
         ----------
-        group : h5py.Group
+        group : HDF5 group
             Group containing the packed channel/core tables.
         shape : iterable of int
             Spatial shape shared by the channel tensor trains.
@@ -256,10 +236,6 @@ class TT:
                 raise IndexError("Tensor-train index is out of bounds.")
             value = value @ core[:, i, :]
         return float(value[0, 0])
-
-    def values(self, indices: Iterable[Iterable[int]]) -> np.ndarray:
-        """Return tensor entries for multiple indices."""
-        return np.array([self.at(index) for index in indices])
 
     def _contract_slice(self, prefix_index):
         prefix_index = tuple(int(i) for i in prefix_index)

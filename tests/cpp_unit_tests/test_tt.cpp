@@ -5,6 +5,7 @@
 #include <functional>
 #include <numeric>
 #include <optional>
+#include <utility>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -14,10 +15,49 @@ using namespace openmc;
 
 namespace {
 
+vector<double> reconstruct(const TT& tt)
+{
+  const auto shape = tt.shape();
+  const int size =
+    std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int>());
+  vector<double> values(size);
+  vector<int> indices(shape.size());
+
+  for (int flat_index = 0; flat_index < size; ++flat_index) {
+    int remainder = flat_index;
+    for (int k = static_cast<int>(shape.size()) - 1; k >= 0; --k) {
+      indices[k] = remainder % shape[k];
+      remainder /= shape[k];
+    }
+
+    vector<double> state {1.0};
+    for (std::size_t k = 0; k < tt.cores.size(); ++k) {
+      const auto& core = tt.cores[k];
+      vector<double> next(core.r_right, 0.0);
+      for (int i = 0; i < core.r_left; ++i) {
+        for (int j = 0; j < core.r_right; ++j) {
+          next[j] += state[i] * core(i, indices[k], j);
+        }
+      }
+      state = std::move(next);
+    }
+    values[flat_index] = state[0];
+  }
+  return values;
+}
+
+TT decompose(const vector<double>& values, const vector<int>& shape,
+  double eps = 1.0e-10)
+{
+  return tt_svd_tally_value(values.data(), static_cast<int>(values.size()),
+    shape, 1.0, false, eps);
+}
+
 void check_reconstruction(const TT& tt, const vector<double>& expected,
   const vector<int>& shape, double tolerance = 1.0e-12)
 {
-  const auto [actual, actual_shape] = tt.full();
+  const auto actual = reconstruct(tt);
+  const auto actual_shape = tt.shape();
   REQUIRE(actual_shape == shape);
   REQUIRE(actual.size() == expected.size());
   REQUIRE(tt.cores.front().r_left == 1);
@@ -61,7 +101,7 @@ vector<double> dense_values(const vector<int>& shape)
 
 } // namespace
 
-TEST_CASE("TT SVD reconstructs tall, wide, and square matrices")
+TEST_CASE("TT tally decomposition reconstructs tall, wide, and square matrices")
 {
   for (const auto& shape :
     vector<vector<int>> {{9, 3}, {3, 9}, {5, 5}, {1, 7}, {7, 1}}) {
@@ -73,23 +113,8 @@ TEST_CASE("TT SVD reconstructs tall, wide, and square matrices")
       }
     }
 
-    const auto svd = fast_svd(matrix);
-    const int rank = std::min(shape[0], shape[1]);
-    REQUIRE(svd.S.size() == rank);
-    REQUIRE(svd.U.rows() == shape[0]);
-    REQUIRE(svd.U.cols() == rank);
-    REQUIRE(svd.Vt.rows() == rank);
-    REQUIRE(svd.Vt.cols() == shape[1]);
-    REQUIRE((matrix - svd.U * svd.S.asDiagonal() * svd.Vt).norm() <=
-            1.0e-12 * matrix.norm());
-    REQUIRE((svd.U.transpose() * svd.U - Eigen::MatrixXd::Identity(rank, rank))
-              .norm() <= 1.0e-12);
-    REQUIRE(
-      (svd.Vt * svd.Vt.transpose() - Eigen::MatrixXd::Identity(rank, rank))
-        .norm() <= 1.0e-12);
-
     const auto values = matrix_values(matrix);
-    check_reconstruction(tt_svd(values, shape, {}, 0.0), values, shape);
+    check_reconstruction(decompose(values, shape, 0.0), values, shape);
   }
 }
 
@@ -104,8 +129,8 @@ TEST_CASE("TT decomposition and rounding preserve nonuniform tensors")
     expected[i] = first[i] + second[i];
   }
 
-  const auto first_tt = tt_svd(first, shape, {}, 1.0e-14);
-  const auto second_tt = tt_svd(second, shape, {}, 1.0e-14);
+  const auto first_tt = decompose(first, shape, 1.0e-14);
+  const auto second_tt = decompose(second, shape, 1.0e-14);
   check_reconstruction(first_tt, first, shape);
   check_reconstruction(second_tt, second, shape);
   auto sum = first_tt + second_tt;
@@ -120,15 +145,10 @@ TEST_CASE("TT zero and rank-one tensors retain minimal ranks")
 
   SECTION("zero tensor")
   {
-    auto tt = tt_svd(values, shape, {}, 1.0e-12);
+    auto tt = decompose(values, shape, 1.0e-12);
     tt.round(std::nullopt, 1.0e-12);
     REQUIRE(tt.ranks() == vector<int> {1, 1, 1, 1});
-    REQUIRE(tt.full().first == values);
-
-    auto zero = tt_zeros(shape);
-    zero.round(std::nullopt, 1.0e-12);
-    REQUIRE(zero.ranks() == vector<int> {1, 1, 1, 1});
-    REQUIRE(zero.full().first == values);
+    REQUIRE(reconstruct(tt) == values);
   }
 
   SECTION("separable tensor")
@@ -141,7 +161,7 @@ TEST_CASE("TT zero and rank-one tensors retain minimal ranks")
         }
       }
     }
-    auto tt = tt_svd(values, shape, {}, 1.0e-12);
+    auto tt = decompose(values, shape, 1.0e-12);
     REQUIRE(tt.ranks() == vector<int> {1, 1, 1, 1});
     tt.round(std::nullopt, 1.0e-12);
     REQUIRE(tt.ranks() == vector<int> {1, 1, 1, 1});
@@ -153,7 +173,7 @@ TEST_CASE("TT decomposition and rounding support a single mode")
 {
   const vector<int> shape {5};
   const vector<double> values {1.0, -3.0, 0.0, 2.5, 1.0e-8};
-  auto tt = tt_svd(values, shape, {}, 1.0e-12);
+  auto tt = decompose(values, shape, 1.0e-12);
   tt.round(std::nullopt, 1.0e-12);
   REQUIRE(tt.ranks() == vector<int> {1, 1});
   check_reconstruction(tt, values, shape);
@@ -164,8 +184,8 @@ TEST_CASE("TT addition preserves boundary ranks for a single mode")
   const vector<int> shape {5};
   const vector<double> values_a {1.0, -3.0, 0.0, 2.5, 1.0e-8};
   const vector<double> values_b {2.0, 1.0, -4.0, 0.5, 3.0};
-  auto tt_a = tt_svd(values_a, shape);
-  auto tt_b = tt_svd(values_b, shape);
+  auto tt_a = decompose(values_a, shape);
+  auto tt_b = decompose(values_b, shape);
 
   auto sum = tt_a + tt_b;
 
@@ -183,13 +203,9 @@ TEST_CASE("TT prescribed ranks and rank caps retain leading singular modes")
   matrix.diagonal() << 4.0, 2.0, 0.5, 0.1, 0.01;
   const vector<int> shape {5, 5};
   const auto values = matrix_values(matrix);
-  auto tt = tt_svd(values, shape, {}, 0.0);
+  auto tt = decompose(values, shape, 0.0);
   int expected_rank = 2;
 
-  SECTION("fixed decomposition rank")
-  {
-    tt = tt_svd(values, shape, {2});
-  }
   SECTION("fixed rounding rank")
   {
     tt.round(vector<int> {2});
@@ -232,10 +248,10 @@ TEST_CASE("TT truncation preserves small resolved singular values")
     const Eigen::MatrixXd expected =
       rotation * retained.asDiagonal() * rotation.transpose();
 
-    auto decomposed = tt_svd(values, shape, {}, eps);
+    auto decomposed = decompose(values, shape, eps);
     auto tally =
       tt_svd_tally_value(values.data(), values.size(), shape, 1.0, false, eps);
-    auto rounded = tt_svd(values, shape, {}, 0.0);
+    auto rounded = decompose(values, shape, 0.0);
     rounded.round(std::nullopt, eps);
     for (const auto* tt : {&decomposed, &tally, &rounded}) {
       REQUIRE(tt->ranks() == vector<int> {1, expected_rank, 1});
@@ -264,7 +280,7 @@ TEST_CASE("TT tally decomposition normalizes and squares immutable input")
 
     const auto zero = tt_svd_tally_value(
       values.data(), values.size(), shape, 0.0, false, 1.0e-13);
-    REQUIRE(zero.full().first == vector<double>(values.size(), 0.0));
+    REQUIRE(reconstruct(zero) == vector<double>(values.size(), 0.0));
     REQUIRE(values == original);
   }
 }

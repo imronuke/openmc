@@ -127,12 +127,6 @@ public:
   //! Tally results reshaped according to filter sizes
   tensor::Tensor<double> get_reshaped_data() const;
 
-  //! Report tensor-train storage for accumulated SUM/SUM_SQ.
-  void write_tt_storage_report() const;
-
-  //! Reconstruct tensor-train accumulated sums into dense results.
-  void reconstruct_tt_results();
-
   //! A string representing the i-th score on this tally
   std::string score_name(int score_idx) const;
 
@@ -266,9 +260,6 @@ void read_tallies_xml(pugi::xml_node root);
 //! \brief Accumulate the sum of the contributions from each history within the
 //! batch to a new random variable
 void accumulate_tallies();
-
-//! Reconstruct all active TT tally accumulators into dense results.
-void reconstruct_tally_tt_results();
 
 //! Return whether any tally is using tensor-train accumulation.
 bool using_tally_tt();
