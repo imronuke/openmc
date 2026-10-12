@@ -20,6 +20,8 @@ namespace {
 using RowMatrix =
   Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 using ConstCoreMap = Eigen::Map<const RowMatrix>;
+using ThinBDCSVD = Eigen::BDCSVD<Eigen::MatrixXd,
+  Eigen::ComputeThinU | Eigen::ComputeThinV>;
 
 ConstCoreMap left_unfolding(const Core& core)
 {
@@ -79,7 +81,7 @@ struct SVDWorkspace {
       factor_ = matrix;
     }
 
-    svd_.compute(factor_, Eigen::ComputeThinU | Eigen::ComputeThinV);
+    svd_.compute(factor_);
     rank_ = std::min(static_cast<int>(svd_.singularValues().size()), max_rank);
     if (eps) {
       rank_ = std::min(rank_, rank_truncation(svd_.singularValues(), *eps));
@@ -112,7 +114,7 @@ struct SVDWorkspace {
   auto singular_values() const { return svd_.singularValues().head(rank_); }
 
   Eigen::HouseholderQR<Eigen::MatrixXd> qr_;
-  Eigen::BDCSVD<Eigen::MatrixXd> svd_;
+  ThinBDCSVD svd_;
   Eigen::MatrixXd factor_;
   Eigen::MatrixXd lifted_;
   int rank_ {0};
@@ -295,8 +297,8 @@ SVDResult randomized_svd(const Eigen::MatrixXd& X,
     Eigen::MatrixXd B = Q.transpose() * X;
 
     // Step 6: SVD of B
-    Eigen::BDCSVD<Eigen::MatrixXd> svd(B,
-        Eigen::ComputeThinU | Eigen::ComputeThinV);
+    ThinBDCSVD svd;
+    svd.compute(B);
 
     int r_out = std::min(rank, static_cast<int>(svd.singularValues().size()));
 

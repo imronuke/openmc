@@ -188,11 +188,8 @@ if(NOT DEFINED HDF5_PREFER_PARALLEL)
 endif()
 
 find_package(HDF5 REQUIRED COMPONENTS C HL)
-find_path(OPENMC_EIGEN3_INCLUDE_DIR
-  NAMES Eigen/Dense
-  HINTS "$ENV{CONDA_PREFIX}/include/eigen3"
-  PATH_SUFFIXES eigen3
-  REQUIRED)
+find_package(Eigen3 5.0 REQUIRED CONFIG
+  HINTS "$ENV{CONDA_PREFIX}/share/eigen3/cmake")
 
 # Remove HDF5 transitive dependencies that are system libraries
 list(FILTER HDF5_LIBRARIES EXCLUDE REGEX ".*lib(pthread|dl|m).*")
@@ -510,7 +507,7 @@ target_include_directories(libopenmc
   PUBLIC
     $<INSTALL_INTERFACE:include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    ${OPENMC_EIGEN3_INCLUDE_DIR}
+    $<TARGET_PROPERTY:Eigen3::Eigen,INTERFACE_INCLUDE_DIRECTORIES>
     ${HDF5_INCLUDE_DIRS}
 )
 
@@ -531,7 +528,7 @@ endif()
 # target_link_libraries treats any arguments starting with - but not -l as
 # linker flags. Thus, we can pass both linker flags and libraries together.
 target_link_libraries(libopenmc ${ldflags} ${HDF5_LIBRARIES} ${HDF5_HL_LIBRARIES}
-                      fmt::fmt ${CMAKE_DL_LIBS})
+                      Eigen3::Eigen fmt::fmt ${CMAKE_DL_LIBS})
 
 if(TARGET pugixml::pugixml)
   target_link_libraries(libopenmc pugixml::pugixml)

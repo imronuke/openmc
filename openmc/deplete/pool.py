@@ -2,8 +2,12 @@
 
 Provided to avoid some circular imports
 """
+import multiprocessing
+import os
+import sys
 from itertools import islice, repeat, starmap
 from multiprocessing import Pool
+from threading import Event, Thread
 
 import numpy as np
 from scipy.sparse import hstack
@@ -18,6 +22,101 @@ USE_MULTIPROCESSING = True
 # Allow user to override the number of worker processes to use for depletion
 # calculations
 NUM_PROCESSES = None
+
+_MEMORY_SAMPLE_INTERVAL = 0.25
+_BYTES_PER_MIB = 1024 * 1024
+
+
+def _read_process_pss(pid):
+    """Return a process's proportional set size in bytes on Linux."""
+    try:
+        with open(f"/proc/{pid}/smaps_rollup", encoding="ascii") as stat:
+            for line in stat:
+                if line.startswith("Pss:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _read_process_rss(pid):
+    """Return a process's resident set size in bytes on Linux."""
+    try:
+        with open(f"/proc/{pid}/statm", encoding="ascii") as stat:
+            resident_pages = int(stat.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+class _ProcessMemorySampler:
+    """Sample aggregate memory for the Python process and its pool workers."""
+
+    def __init__(self, pids):
+        self.pids = tuple(pids)
+        self.memory_kind = "PSS"
+        if not all(_read_process_pss(pid) is not None for pid in self.pids):
+            self.memory_kind = "RSS"
+            if not all(_read_process_rss(pid) is not None for pid in self.pids):
+                raise RuntimeError("Unable to read process memory from /proc.")
+
+        self._read_memory = (
+            _read_process_pss if self.memory_kind == "PSS"
+            else _read_process_rss)
+        self._stop = Event()
+        self._thread = Thread(target=self._sample_periodically, daemon=True)
+        self._memory_sum = 0
+        self._sample_count = 0
+        self._peak_memory = 0
+
+    def _sample(self):
+        values = [self._read_memory(pid) for pid in self.pids]
+        if any(value is None for value in values):
+            return
+
+        total_memory = sum(values)
+        self._memory_sum += total_memory
+        self._sample_count += 1
+        self._peak_memory = max(self._peak_memory, total_memory)
+
+    def _sample_periodically(self):
+        while not self._stop.wait(_MEMORY_SAMPLE_INTERVAL):
+            self._sample()
+
+    def start(self):
+        self._sample()
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join()
+        self._sample()
+        if self._sample_count == 0:
+            return None
+
+        return (
+            self._memory_sum / self._sample_count,
+            self._peak_memory,
+            self.memory_kind,
+        )
+
+
+def _report_pool_memory(sampler, n_workers):
+    if sampler is None:
+        return
+
+    memory = sampler.stop()
+    if memory is None:
+        return
+
+    average_memory, peak_memory, memory_kind = memory
+    print(
+        f"[openmc.deplete] Bateman process memory (rank {comm.rank}, "
+        f"parent + {n_workers} workers; sampled aggregate {memory_kind}): "
+        f"average={average_memory / _BYTES_PER_MIB:.1f} MiB, "
+        f"peak={peak_memory / _BYTES_PER_MIB:.1f} MiB",
+        flush=True,
+    )
 
 
 def _distribute(items):
@@ -70,15 +169,28 @@ def _solve_matrices(func, inputs, batch_size=None, parallel=True):
     if USE_MULTIPROCESSING and parallel:
         results = []
         with Pool(NUM_PROCESSES) as pool:
-            if batch_size is None:
-                return list(pool.starmap(func, inputs))
+            sampler = None
+            if sys.platform == "linux":
+                try:
+                    workers = multiprocessing.active_children()
+                    sampler = _ProcessMemorySampler(
+                        [os.getpid(), *(worker.pid for worker in workers)])
+                    sampler.start()
+                except (OSError, RuntimeError):
+                    sampler = None
 
-            inputs = iter(inputs)
-            while True:
-                batch = list(islice(inputs, batch_size))
-                if not batch:
-                    break
-                results.extend(pool.starmap(func, batch))
+            try:
+                if batch_size is None:
+                    return list(pool.starmap(func, inputs))
+
+                inputs = iter(inputs)
+                while True:
+                    batch = list(islice(inputs, batch_size))
+                    if not batch:
+                        break
+                    results.extend(pool.starmap(func, batch))
+            finally:
+                _report_pool_memory(sampler, len(workers) if sampler else 0)
         return results
 
     return list(starmap(func, inputs))
