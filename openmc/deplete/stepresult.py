@@ -19,10 +19,29 @@ from .reaction_rates import ReactionRates
 from .tt_depletion import (
     _get_tt_depletion_rate_write_data, _write_tt_depletion_rates)
 
-VERSION_RESULTS = (1, 4)
+VERSION_RESULTS = (1, 6)
 
 
 __all__ = ["StepResult"]
+
+
+def _get_rate_rel_err(operator):
+    """Return direct-tally relative errors in reaction-rate array order."""
+    rate_helper = vars(operator).get('_rate_helper')
+    get_material_rate_rel_err = getattr(
+        rate_helper, 'get_material_rate_rel_err', None)
+    if not callable(get_material_rate_rel_err):
+        return None
+
+    rates = operator.reaction_rates
+    nuc_ind = [rates.index_nuc[nuc] for nuc in rate_helper.nuclides]
+    rx_ind = [rates.index_rx[rx] for rx in operator.chain.reactions]
+    rate_rel_err = np.zeros_like(rates)
+    for i, mat in enumerate(operator.local_mats):
+        mat_index = operator._mat_index_map[mat]
+        rate_rel_err[i] = get_material_rate_rel_err(
+            mat_index, nuc_ind, rx_ind)
+    return rate_rel_err
 
 
 class StepResult:
@@ -45,6 +64,8 @@ class StepResult:
         Number of nuclides.
     rates : ReactionRates
         The reaction rates at end of step.
+    rate_rel_err : numpy.ndarray or None
+        Relative standard errors of the reaction rates, if written.
     volume : dict of str to float
         Dictionary mapping mat id to volume.
     index_mat : dict of str to int
@@ -69,6 +90,7 @@ class StepResult:
         self.time = None
         self.source_rate = None
         self.rates = None
+        self.rate_rel_err = None
         self.volume = None
         self.proc_time = None
 
@@ -201,6 +223,8 @@ class StepResult:
         # Get applicable slice of data
         new.data = self.data[ranges]
         new.rates = self.rates[ranges]
+        if self.rate_rel_err is not None:
+            new.rate_rel_err = self.rate_rel_err[ranges]
         return new
 
     def get_material(self, mat_id: str | int) -> openmc.Material:
@@ -248,7 +272,9 @@ class StepResult:
         material.volume = vol
         return material
 
-    def export_to_hdf5(self, filename, step, write_rates: bool = False):
+    def export_to_hdf5(
+            self, filename, step, write_rates: bool = False,
+            write_rates_rstd: bool = False):
         """Export results to an HDF5 file
 
         Parameters
@@ -258,7 +284,10 @@ class StepResult:
         step : int
             What step is this?
         write_rates : bool, optional
-            Whether to include reaction rate datasets in the results file.
+            Whether to include mean reaction rates in the results file.
+        write_rates_rstd : bool, optional
+            Whether to include reaction-rate relative standard deviations.
+            If true, mean reaction rates are also included.
 
         """
         # Write new file if first time step, else add to existing file
@@ -270,7 +299,8 @@ class StepResult:
             kwargs['comm'] = comm
             with h5py.File(filename, **kwargs) as handle:
                 self._to_hdf5(handle, step, parallel=True,
-                              write_rates=write_rates)
+                              write_rates=write_rates,
+                              write_rates_rstd=write_rates_rstd)
         else:
             # Gather results at root process
             all_results = comm.gather(self)
@@ -280,9 +310,11 @@ class StepResult:
                 with h5py.File(filename, **kwargs) as handle:
                     for res in all_results:
                         res._to_hdf5(handle, step, parallel=False,
-                                     write_rates=write_rates)
+                                     write_rates=write_rates,
+                                     write_rates_rstd=write_rates_rstd)
 
-    def _write_hdf5_metadata(self, handle, write_rates):
+    def _write_hdf5_metadata(
+            self, handle, write_rates, write_rates_rstd=False):
         """Writes result metadata in HDF5 file
 
         Parameters
@@ -290,7 +322,10 @@ class StepResult:
         handle : h5py.File or h5py.Group
             An hdf5 file or group type to store this in.
         write_rates : bool
-            Whether reaction rate datasets are being written.
+            Whether mean reaction rates are being written.
+        write_rates_rstd : bool
+            Whether reaction-rate relative standard deviations are being
+            written. If true, mean reaction rates are also written.
 
         """
         # Create and save the 5 dictionaries:
@@ -311,10 +346,16 @@ class StepResult:
         nuc_list = sorted(self.index_nuc)
 
         include_rates = (
-            write_rates
+            (write_rates or write_rates_rstd)
             and self.rates is not None
             and bool(self.rates.index_nuc)
             and bool(self.rates.index_rx)
+        )
+        include_rate_rel_err = (
+            include_rates
+            and write_rates_rstd
+            and self.tt_rates is None
+            and self.rate_rel_err is not None
         )
         rxn_list = sorted(self.rates.index_rx) if include_rates else []
 
@@ -363,6 +404,13 @@ class StepResult:
                 maxshape=(None, n_mats, n_nuc_rxn, n_rxn),
                 chunks=True, dtype='float64')
 
+        if include_rate_rel_err:
+            handle.create_dataset(
+                "reaction rate relative errors",
+                (1, n_mats, n_nuc_rxn, n_rxn),
+                maxshape=(None, n_mats, n_nuc_rxn, n_rxn),
+                chunks=True, dtype='float64')
+
         handle.create_dataset("eigenvalues", (1, 2),
                               maxshape=(None, 2), dtype='float64')
 
@@ -379,7 +427,9 @@ class StepResult:
             "keff_search_root", (1,), maxshape=(None,),
             dtype="float64")
 
-    def _to_hdf5(self, handle, index, parallel=False, write_rates: bool = False):
+    def _to_hdf5(
+            self, handle, index, parallel=False, write_rates: bool = False,
+            write_rates_rstd: bool = False):
         """Converts results object into an hdf5 object.
 
         Parameters
@@ -392,12 +442,16 @@ class StepResult:
             Being called with parallel HDF5?
         write_rates : bool, optional
             Whether reaction rate datasets are being written.
+        write_rates_rstd : bool, optional
+            Whether relative standard deviations are being written. If true,
+            mean reaction rates are also written.
 
         """
         if "/number" not in handle:
             if parallel:
                 comm.barrier()
-            self._write_hdf5_metadata(handle, write_rates)
+            self._write_hdf5_metadata(
+                handle, write_rates, write_rates_rstd)
 
         if parallel:
             comm.barrier()
@@ -407,6 +461,9 @@ class StepResult:
         has_reactions = ("reaction rates" in handle)
         if has_reactions:
             rxn_dset = handle["/reaction rates"]
+        has_rate_rel_err = "reaction rate relative errors" in handle
+        if has_rate_rel_err:
+            rate_rel_err_dset = handle["/reaction rate relative errors"]
         eigenvalues_dset = handle["/eigenvalues"]
         time_dset = handle["/time"]
         source_rate_dset = handle["/source_rate"]
@@ -428,6 +485,11 @@ class StepResult:
                 rxn_shape = list(rxn_dset.shape)
                 rxn_shape[0] = new_shape
                 rxn_dset.resize(rxn_shape)
+
+            if has_rate_rel_err:
+                rate_rel_err_shape = list(rate_rel_err_dset.shape)
+                rate_rel_err_shape[0] = new_shape
+                rate_rel_err_dset.resize(rate_rel_err_shape)
 
             eigenvalues_shape = list(eigenvalues_dset.shape)
             eigenvalues_shape[0] = new_shape
@@ -460,6 +522,8 @@ class StepResult:
         number_dset[index, low:high+1] = self.data
         if has_reactions:
             rxn_dset[index, low:high+1] = self.rates
+        if has_rate_rel_err:
+            rate_rel_err_dset[index, low:high+1] = self.rate_rel_err
         if self.tt_rates and comm.rank == 0:
             _write_tt_depletion_rates(
                 handle, index, self.tt_rates)
@@ -567,6 +631,14 @@ class StepResult:
                 rate[:] = handle["/reaction rates"][step, :, :, :]
         results.rates = rate
 
+        if "reaction rate relative errors" in handle:
+            if has_stages:
+                results.rate_rel_err = handle[
+                    "/reaction rate relative errors"][step, 0, :, :, :]
+            else:
+                results.rate_rel_err = handle[
+                    "/reaction rate relative errors"][step, :, :, :]
+
         return results
 
     @staticmethod
@@ -580,7 +652,8 @@ class StepResult:
         proc_time=None,
         write_rates: bool = False,
         keff_search_root=None,
-        path: PathLike = "depletion_results.h5"
+        path: PathLike = "depletion_results.h5",
+        write_rates_rstd: bool = False
     ):
         """Creates and writes depletion results to disk
 
@@ -603,7 +676,10 @@ class StepResult:
             be process-dependent and will be reduced across MPI
             processes.
         write_rates : bool, optional
-            Whether reaction rates should be written to the results file.
+            Whether mean reaction rates should be written to the results file.
+        write_rates_rstd : bool, optional
+            Whether reaction-rate relative standard deviations should also be
+            written. If true, mean reaction rates are also written.
         keff_search_root : float
             The root returned by the keff search control.
         path : PathLike
@@ -628,16 +704,21 @@ class StepResult:
             results.k = (None, None)
         else:
             results.k = (op_results.k.nominal_value, op_results.k.std_dev)
-        if (write_rates and
-                tt_rate_mode):
+        if ((write_rates or write_rates_rstd) and tt_rate_mode):
             results.rates = op.reaction_rates
             # Empty dict marks TT mode on non-root ranks without carrying cores.
             results.tt_rates = {}
             if comm.rank == 0:
                 results.tt_rates = _get_tt_depletion_rate_write_data(
-                    op, op_results.rates)
+                    op, op_results.rates, write_rates_rstd)
         else:
             results.rates = op_results.rates
+            if write_rates_rstd and not tt_rate_mode:
+                results.rate_rel_err = _get_rate_rel_err(op)
+                if results.rate_rel_err is None:
+                    raise ValueError(
+                        "Reaction-rate relative standard deviations are "
+                        "only available for direct reaction-rate tallies.")
         results.time = t
         results.source_rate = source_rate
         results.proc_time = proc_time
@@ -647,7 +728,8 @@ class StepResult:
 
         if not Path(path).is_file():
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        results.export_to_hdf5(path, step_ind, write_rates)
+        results.export_to_hdf5(
+            path, step_ind, write_rates, write_rates_rstd)
 
     def transfer_volumes(self, model):
         """Transfers volumes from depletion results to geometry

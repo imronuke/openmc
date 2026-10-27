@@ -24,6 +24,7 @@ from openmc.deplete import (
     LEQIIntegrator, SICELIIntegrator, SILEQIIntegrator, TTDepletionRates,
     cram, pool)
 from openmc.deplete.tt_depletion import _TTReactionRates
+from openmc.deplete.helpers import DirectReactionRateHelper
 
 from tests import dummy_operator
 
@@ -117,6 +118,9 @@ def test_results_save(run_in_tmpdir):
     StepResult.save(op, x1, op_result1, t1, 0, 0, write_rates=True)
     StepResult.save(op, x2, op_result2, t2, 0, 1, write_rates=True)
 
+    with h5py.File("depletion_results.h5", "r") as handle:
+        assert "reaction rate relative errors" not in handle
+
     # Load the files
     res = Results("depletion_results.h5")
 
@@ -187,6 +191,10 @@ def test_results_save_tt_rates(run_in_tmpdir):
         TT(cores),
         TT([2.0 * core for core in cores]),
     )
+    tally.tt_sum_sq = (
+        TT([3.0 * core for core in cores]),
+        TT([5.0 * core for core in cores]),
+    )
     op._rate_helper = MagicMock()
     op._rate_helper._tt_eps = 1.0e-20
     op._rate_helper._tt_shape = (2, 3, 4)
@@ -204,6 +212,17 @@ def test_results_save_tt_rates(run_in_tmpdir):
         op, x, op_result, [0.0, 1.0], 1.0, 0, write_rates=True)
 
     with h5py.File('depletion_results.h5', 'r') as handle:
+        step = handle['tt_depletion_reaction_rates/steps/0']
+        assert 'tt_mean' in step
+        assert 'tt_sum_sq' not in step
+        assert handle[
+            'tt_depletion_reaction_rates'].attrs['format_version'] == 2
+
+    StepResult.save(
+        op, x, op_result, [0.0, 1.0], 1.0, 0,
+        write_rates_rstd=True)
+
+    with h5py.File('depletion_results.h5', 'r') as handle:
         assert 'reaction rates' not in handle
         _assert_dense_atom_numbers(handle, 0, 0, x)
         assert 'reactions' in handle
@@ -212,7 +231,7 @@ def test_results_save_tt_rates(run_in_tmpdir):
         assert handle['reactions/capture'].attrs['index'] == 1
 
         group = handle['tt_depletion_reaction_rates']
-        assert group.attrs['format_version'] == 2
+        assert group.attrs['format_version'] == 3
         assert group.attrs['tt_layout_version'] == 1
         assert group.attrs['stored_values'] == b'tally_mean'
         assert group.attrs['normalization_mode'] == b'fission-q'
@@ -247,6 +266,25 @@ def test_results_save_tt_rates(run_in_tmpdir):
         np.testing.assert_allclose(
             tt_mean['core_data'][24:32], (2 * cores[2]).ravel())
 
+        tt_sum_sq = step['tt_sum_sq']
+        np.testing.assert_array_equal(
+            tt_sum_sq['channel_core_offsets'][()], [0, 3, 6])
+        np.testing.assert_array_equal(
+            tt_sum_sq['core_shapes'][()].reshape(-1, 3),
+            [(1, 2, 1), (1, 3, 2), (2, 4, 1)] * 2)
+        np.testing.assert_allclose(
+            tt_sum_sq['core_data'][0:2], (3 * cores[0]).ravel())
+        np.testing.assert_allclose(
+            tt_sum_sq['core_data'][2:8], (3 * cores[1]).ravel())
+        np.testing.assert_allclose(
+            tt_sum_sq['core_data'][8:16], (3 * cores[2]).ravel())
+        np.testing.assert_allclose(
+            tt_sum_sq['core_data'][16:18], (5 * cores[0]).ravel())
+        np.testing.assert_allclose(
+            tt_sum_sq['core_data'][18:24], (5 * cores[1]).ravel())
+        np.testing.assert_allclose(
+            tt_sum_sq['core_data'][24:32], (5 * cores[2]).ravel())
+
     results = Results('depletion_results.h5')
     np.testing.assert_allclose(results[0].data, [[1.0, 2.0]])
     times, atoms = results.get_atoms("1", "Xe135")
@@ -276,6 +314,10 @@ def test_tt_depletion_rates_reader(run_in_tmpdir):
         TT([np.array([[[70.0]]])], shape=(1,)),
         TT([np.array([[[110.0]]])], shape=(1,)),
     )
+    tally.tt_sum_sq = (
+        TT([np.array([[[1050.0]]])], shape=(1,)),
+        TT([np.array([[[2650.0]]])], shape=(1,)),
+    )
     op._rate_helper = MagicMock()
     op._rate_helper._tt_eps = 1.0e-12
     op._rate_helper._tt_shape = (1,)
@@ -290,7 +332,8 @@ def test_tt_depletion_rates_reader(run_in_tmpdir):
         _TTReactionRates(3.0, reaction_rate_mask=reaction_rate_mask))
 
     StepResult.save(
-        op, x, op_result, [0.0, 1.0], 1.0, 0, write_rates=True)
+        op, x, op_result, [0.0, 1.0], 1.0, 0,
+        write_rates_rstd=True)
 
     with h5py.File('depletion_results.h5', 'r') as handle:
         _assert_dense_atom_numbers(handle, 0, 0, x)
@@ -307,12 +350,33 @@ def test_tt_depletion_rates_reader(run_in_tmpdir):
     assert reader.get_rate(0, "1", "U235", "capture") == pytest.approx(
         expected[0, 1])
 
+    expected_rel_err = np.array([[
+        np.sqrt((1050.0 / 5 - 14.0**2) / 4) / 14.0,
+        np.sqrt((2650.0 / 5 - 22.0**2) / 4) / 22.0,
+    ]])
+    np.testing.assert_allclose(
+        reader.get_material_rel_err(0, "1"), expected_rel_err)
+    assert reader.get_rel_err(0, "1", "U235", "fission") == pytest.approx(
+        expected_rel_err[0, 0])
+    np.testing.assert_allclose(
+        reader.to_relative_errors(0), expected_rel_err.reshape((1, 1, 2)))
+
     dense_rates = reader.to_reaction_rates(0)
     assert dense_rates.shape == (1, 1, 2)
     np.testing.assert_allclose(dense_rates[0], expected)
 
     with pytest.raises(IndexError, match="out of bounds"):
         reader.get_material_rates(1, "1")
+
+    with h5py.File('depletion_results.h5', 'r+') as handle:
+        group = handle['tt_depletion_reaction_rates']
+        group.attrs['format_version'] = 2
+        del group['steps/0/tt_sum_sq']
+    legacy_reader = TTDepletionRates('depletion_results.h5')
+    np.testing.assert_allclose(
+        legacy_reader.get_material_rates(0, "1"), expected)
+    with pytest.raises(RuntimeError, match="relative errors are unavailable"):
+        legacy_reader.get_material_rel_err(0, "1")
 
 
 def test_results_save_tt_zero_source_rates(run_in_tmpdir):
@@ -347,6 +411,7 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
         assert 'reaction rates' not in handle
         _assert_dense_atom_numbers(handle, 0, 0, x)
         group = handle['tt_depletion_reaction_rates']
+        assert group.attrs['format_version'] == 2
         assert group.attrs['tt_eps'] == 1.0e-30
         np.testing.assert_array_equal(
             group['reaction_rate_mask'][()], reaction_rate_mask)
@@ -361,8 +426,56 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
     assert reader.tt_eps == 1.0e-30
     material_rates = reader.get_material_rates(0, "1")
     np.testing.assert_allclose(material_rates, [[0.0]])
+    np.testing.assert_allclose(reader.get_material_rel_err(0, "1"), [[0.0]])
     assert reader.get_rate(0, "1", "U235", "fission") == 0.0
     np.testing.assert_allclose(reader.to_reaction_rates(0), [[[0.0]]])
+
+
+def test_results_save_direct_rate_relative_errors(run_in_tmpdir):
+    """Direct tally relative errors are stored beside depletion rates."""
+    op = MagicMock()
+    op.prev_res = None
+    op._tt_depletion_used = False
+    op.get_results_info.return_value = (
+        {"1": 2.0}, ["U235"], ["1"], ["1"], {"1": ""})
+    op.reaction_rates = ReactionRates(["1"], ["U235"], ["fission"])
+    op.local_mats = ["1"]
+    op._mat_index_map = {"1": 0}
+    op.chain = SimpleNamespace(reactions=["fission"])
+    op._rate_helper = SimpleNamespace(
+        nuclides=["U235"],
+        get_material_rate_rel_err=lambda *args: np.array([[0.125]]))
+
+    rates = ReactionRates(["1"], ["U235"], ["fission"])
+    rates[0, 0, 0] = 3.0
+    op_result = OperatorResult(ufloat(1.0, 0.1), rates)
+    StepResult.save(
+        op, [np.array([1.0])], op_result, [0.0, 1.0], 1.0, 0,
+        write_rates_rstd=True)
+
+    with h5py.File('depletion_results.h5', 'r') as handle:
+        np.testing.assert_allclose(
+            handle['reaction rate relative errors'][()], [[[0.125]]])
+        np.testing.assert_allclose(
+            handle['reaction rates'][()], [[[[3.0]]]])
+
+    results = Results('depletion_results.h5')
+    np.testing.assert_allclose(results[0].rate_rel_err, [[[0.125]]])
+
+
+def test_direct_rate_relative_error_mapping():
+    """Direct tally relative errors use reaction-rate index ordering."""
+    helper = object.__new__(DirectReactionRateHelper)
+    helper._results_cache = np.zeros((2, 2))
+    helper._rate_tally = SimpleNamespace(
+        uses_tt=False,
+        num_realizations=3,
+        std_dev=np.array([[2.0, np.inf, 4.0, 2.0]]))
+    helper._rate_tally_means_cache = np.array([[4.0, 0.0, 8.0, 4.0]])
+    helper._rate_tally_std_dev_cache = None
+
+    rel_err = helper.get_material_rate_rel_err(0, [1, 0], [1, 0])
+    np.testing.assert_allclose(rel_err, [[0.5, 0.5], [0.0, 0.5]])
 
 
 def test_results_save_tt_mode_dense_atom_number(run_in_tmpdir):

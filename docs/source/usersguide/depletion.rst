@@ -37,6 +37,22 @@ time::
     results = openmc.deplete.Results("depletion_results.h5")
     time, keff = results.get_keff()
 
+Reaction-rate means can be stored by passing ``write_rates=True`` to the
+integrator's ``integrate`` method. Relative standard errors for directly
+tallied rates are stored with the means when ``write_rates_rstd=True``; this
+option also stores the means even when ``write_rates`` is left at its default
+value. For tensor-train depletion, the relative errors are reconstructed from
+the saved squared-tally tensor-train cores using
+:class:`openmc.deplete.TTDepletionRates`.
+For conventional depletion, access them with ``results[step].rate_rel_err``.
+For tensor-train depletion, use the reader's ``to_relative_errors`` method:
+
+.. code-block:: python
+
+    integrator.integrate(write_rates_rstd=True)
+    tt_rates = openmc.deplete.TTDepletionRates("depletion_results.h5")
+    relative_errors = tt_rates.to_relative_errors(0)
+
 Note that the coupling between the reaction rate solver and the transmutation
 solver happens in-memory rather than by reading/writing files on disk. OpenMC
 has two categories of transport operators for obtaining transmutation reaction

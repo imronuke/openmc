@@ -922,7 +922,8 @@ class Integrator(ABC):
             final_step: bool = True,
             output: bool = True,
             path: PathLike = 'depletion_results.h5',
-            write_rates: bool = False
+            write_rates: bool = False,
+            write_rates_rstd: bool = False
         ):
         """Perform the entire depletion process across all steps
 
@@ -942,10 +943,16 @@ class Integrator(ABC):
 
             .. versionadded:: 0.15.0
         write_rates : bool, optional
-            Whether reaction rates should be written to the results file for
-            each step. Defaults to ``False`` to reduce file size.
+            Whether mean reaction rates should be written to the results file
+            for each step. Defaults to ``False`` to reduce file size.
 
             .. versionadded:: 0.15.3
+        write_rates_rstd : bool, optional
+            Whether reaction-rate relative standard deviations should also be
+            written. If ``True``, both means and relative standard deviations
+            are written, regardless of ``write_rates``. Defaults to ``False``.
+
+            .. versionadded:: 0.15.4
         """
         with change_directory(self.operator.output_dir):
             n = self.operator.initial_condition()
@@ -972,6 +979,7 @@ class Integrator(ABC):
                     self._i_res + i,
                     proc_time,
                     write_rates=write_rates,
+                    write_rates_rstd=write_rates_rstd,
                     keff_search_root=keff_search_root,
                     path=path
                 )
@@ -1002,6 +1010,7 @@ class Integrator(ABC):
                 self._i_res + len(self),
                 proc_time,
                 write_rates=write_rates,
+                write_rates_rstd=write_rates_rstd,
                 keff_search_root=keff_search_root,
                 path=path
             )
@@ -1408,7 +1417,8 @@ class SIIntegrator(Integrator):
         self,
         output: bool = True,
         path: PathLike = "depletion_results.h5",
-        write_rates: bool = False
+        write_rates: bool = False,
+        write_rates_rstd: bool = False
     ):
         """Perform the entire depletion process across all steps
 
@@ -1421,10 +1431,16 @@ class SIIntegrator(Integrator):
 
             .. versionadded:: 0.15.0
         write_rates : bool, optional
-            Whether reaction rates should be written to the results file for
-            each step. Defaults to ``False`` to reduce file size.
+            Whether mean reaction rates should be written to the results file
+            for each step. Defaults to ``False`` to reduce file size.
 
             .. versionadded:: 0.15.3
+        write_rates_rstd : bool, optional
+            Whether reaction-rate relative standard deviations should also be
+            written. If ``True``, both means and relative standard deviations
+            are written, regardless of ``write_rates``. Defaults to ``False``.
+
+            .. versionadded:: 0.15.4
         """
         with change_directory(self.operator.output_dir):
             n = self.operator.initial_condition()
@@ -1454,6 +1470,7 @@ class SIIntegrator(Integrator):
                     self._i_res + i,
                     proc_time,
                     write_rates=write_rates,
+                    write_rates_rstd=write_rates_rstd,
                     path=path
                 )
 
@@ -1472,6 +1489,7 @@ class SIIntegrator(Integrator):
                 self._i_res + len(self),
                 proc_time,
                 write_rates=write_rates,
+                write_rates_rstd=write_rates_rstd,
                 path=path
             )
             self.operator.write_bos_data(self._i_res + len(self))

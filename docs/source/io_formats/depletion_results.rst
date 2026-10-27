@@ -4,7 +4,7 @@
 Depletion Results File Format
 =============================
 
-The current version of the depletion results file format is 1.4.
+The current version of the depletion results file format is 1.6.
 
 **/**
 
@@ -20,9 +20,13 @@ The current version of the depletion results file format is 1.4.
              materials, number of nuclides).
            - **reaction rates** (*double[][][][]*) -- Reaction rates at each
              timestep. This array has shape (number of timesteps, number of
-             materials, number of nuclides, number of reactions). Only stored if
-             ``write_rates=True`` and tensor-train reaction-rate storage is not
-             used.
+             materials, number of nuclides, number of reactions). Stored if
+             ``write_rates=True`` or ``write_rates_rstd=True`` and tensor-train
+             reaction-rate storage is not used.
+           - **reaction rate relative errors** (*double[][][][]*) -- Relative
+             standard errors of directly tallied reaction rates. This array
+             has the same shape and indices as **reaction rates** and is
+             stored when ``write_rates_rstd=True``.
            - **time** (*double[][2]*) -- Time in [s] at beginning/end of each
              step.
            - **source_rate** (*double[]*) -- Power in [W] or source rate in
@@ -52,9 +56,13 @@ The current version of the depletion results file format is 1.4.
 
 **/tt_depletion_reaction_rates/**
 
+This group is present when ``write_rates=True`` or
+``write_rates_rstd=True``.
+
 :Attributes: - **format_version** (*int*) -- Version of the tensor-train
-               depletion reaction-rate storage format. Version 2 stores
-               per-channel means and channel-to-rate indices.
+             depletion reaction-rate storage format. Version 2 stores
+             per-channel means and channel-to-rate indices. Version 3 also
+             stores per-channel sums of squares for relative standard errors.
              - **tt_layout_version** (*int*) -- Tensor-train layout version.
                Version 1 stores packed per-channel cores.
              - **stored_values** (*char[]*) -- Indicates the stored tensor-train
@@ -89,6 +97,13 @@ The current version of the depletion results file format is 1.4.
 
 **/tt_depletion_reaction_rates/steps/<step>/tt_mean/**
 
+**/tt_depletion_reaction_rates/steps/<step>/tt_sum_sq/**
+
+This group is present only when ``write_rates_rstd=True`` and the step has a
+nonzero source.
+
+Both groups contain the following packed core datasets:
+
 :Datasets: - **channel_core_offsets** (*int64[]*) -- Length is one greater
              than the number of channels. Zero-based start and end core indices
              for each channel, with end offsets excluded.
@@ -101,8 +116,12 @@ The current version of the depletion results file format is 1.4.
              every core. All-zero channels have no cores and equal adjacent
              entries in **channel_core_offsets**.
 
+The **tt_mean** and **tt_sum_sq** groups use the packed core datasets described
+above. **tt_sum_sq** stores the accumulated sums of squared batch tally values.
 Each TT channel is one nuclide-reaction pair and uses the shared spatial
 ``tt_shape``. The channel's indices in **channel_indices** map it into the
 reaction-rate matrix. The stored cores represent the tally mean; the shared
 normalization factor and material volume convert a material slice to a
-depletion reaction rate.
+depletion reaction rate. When the sums of squares are present,
+``TTDepletionRates`` computes relative standard errors from the stored mean,
+sum-of-squares, and realization count.

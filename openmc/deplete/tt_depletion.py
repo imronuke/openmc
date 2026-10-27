@@ -33,15 +33,16 @@ class _TTReactionRates:
         self.reaction_rate_mask = reaction_rate_mask
 
 
-def _copy_tt_mean(tt, n_realizations):
-    """Return a TT copy representing the tally mean."""
+def _copy_tt(tt, divisor=1):
+    """Return a copy of a tensor train, optionally scaled by a divisor."""
     cores = [core.copy() for core in tt.cores]
-    if n_realizations > 0 and cores:
-        cores[0] /= n_realizations
+    if divisor > 0 and divisor != 1 and cores:
+        cores[0] /= divisor
     return TT(cores, shape=tt.shape)
 
 
-def _get_tt_depletion_rate_write_data(operator, rates):
+def _get_tt_depletion_rate_write_data(
+        operator, rates, write_rates_rstd=False):
     """Return TT depletion reaction-rate data for HDF5 output."""
     rate_helper = vars(operator).get('_rate_helper')
     tt_eps = None if rate_helper is None else vars(rate_helper).get('_tt_eps')
@@ -67,6 +68,8 @@ def _get_tt_depletion_rate_write_data(operator, rates):
             'tt_shape': tuple() if tt_shape is None else tuple(tt_shape),
             'channel_indices': channel_indices,
             'tt_means': None,
+            'tt_sum_sq': None,
+            'write_rates_rstd': write_rates_rstd,
         }
 
     tally = operator._rate_helper._rate_tally
@@ -81,6 +84,17 @@ def _get_tt_depletion_rate_write_data(operator, rates):
         raise RuntimeError(
             "Tensor-train channel count does not match depletion rate "
             "indices.")
+    tt_sum_sq = None
+    if write_rates_rstd:
+        tt_sum_sq = tuple(tally.tt_sum_sq)
+        if any(tt.shape != tt_shape for tt in tt_sum_sq):
+            raise RuntimeError(
+                "Tensor-train sum-of-squares channel shape does not match "
+                "depletion filter shape.")
+        if len(tt_sum_sq) != len(channel_indices):
+            raise RuntimeError(
+                "Tensor-train sum-of-squares channel count does not match "
+                "depletion rate indices.")
     return {
         'zero_source': False,
         'tt_eps': tt_eps,
@@ -90,14 +104,20 @@ def _get_tt_depletion_rate_write_data(operator, rates):
         'tt_shape': tt_shape,
         'channel_indices': channel_indices,
         'tt_means': tuple(
-            _copy_tt_mean(tt, n_realizations) for tt in tt_sum),
+            _copy_tt(tt, n_realizations) for tt in tt_sum),
+        'tt_sum_sq': (
+            None if tt_sum_sq is None else
+            tuple(_copy_tt(tt) for tt in tt_sum_sq)),
+        'write_rates_rstd': write_rates_rstd,
     }
 
 
 def _write_tt_depletion_rates(handle, step, data):
     """Write per-step TT depletion reaction-rate data to HDF5."""
     group = handle.require_group(_TT_DEPLETION_RATES)
-    group.attrs['format_version'] = 2
+    format_version = 3 if data['write_rates_rstd'] else 2
+    group.attrs['format_version'] = max(
+        int(group.attrs.get('format_version', 2)), format_version)
     group.attrs['tt_layout_version'] = _TT_LAYOUT_VERSION
     group.attrs['stored_values'] = np.bytes_('tally_mean')
     group.attrs['normalization_mode'] = np.bytes_('fission-q')
@@ -137,6 +157,9 @@ def _write_tt_depletion_rates(handle, step, data):
     if not data['zero_source']:
         tt_mean_group = step_group.create_group('tt_mean')
         _write_packed_tt_channels(tt_mean_group, data['tt_means'])
+        if data['write_rates_rstd']:
+            tt_sum_sq_group = step_group.create_group('tt_sum_sq')
+            _write_packed_tt_channels(tt_sum_sq_group, data['tt_sum_sq'])
 
 
 class TTDepletionRates:
@@ -160,10 +183,11 @@ class TTDepletionRates:
 
             tt_group = handle[_TT_DEPLETION_RATES]
             format_version = int(tt_group.attrs.get('format_version', -1))
-            if format_version != 2:
+            if format_version not in (2, 3):
                 raise RuntimeError(
                     f"Unsupported TT depletion results format version "
                     f"{format_version}.")
+            self.format_version = format_version
             layout_version = int(
                 tt_group.attrs.get('tt_layout_version', -1))
             if layout_version != _TT_LAYOUT_VERSION:
@@ -231,6 +255,7 @@ class TTDepletionRates:
 
         self._cached_step = None
         self._cached_tt_means = None
+        self._cached_tt_sum_sq = None
 
     def _normalize_step(self, step):
         if step < 0:
@@ -244,6 +269,22 @@ class TTDepletionRates:
             {mat: 0}, self.index_nuc, self.index_rx, from_results=True)[0]
         rates.fill(0.0)
         return rates
+
+    def _load_step_tts(self, step, step_group, tt_shape):
+        if self._cached_step == step:
+            return
+        if 'tt_mean' not in step_group:
+            raise RuntimeError(
+                "Tensor-train means are missing from depletion step.")
+        self._cached_tt_means = TT.from_hdf5_channels(
+            step_group['tt_mean'], tt_shape, len(self.channel_indices))
+        if 'tt_sum_sq' in step_group:
+            self._cached_tt_sum_sq = TT.from_hdf5_channels(
+                step_group['tt_sum_sq'], tt_shape,
+                len(self.channel_indices))
+        else:
+            self._cached_tt_sum_sq = None
+        self._cached_step = step
 
     def get_material_rates(self, step, mat):
         """Return reaction rates for one material at one depletion step.
@@ -278,14 +319,7 @@ class TTDepletionRates:
                 raise IndexError("Material index is out of bounds.")
 
             prefix_index = _flat_to_tt_index(mat_index, filter_shape)
-            if self._cached_step != step:
-                if 'tt_mean' not in step_group:
-                    raise RuntimeError(
-                        "Tensor-train means are missing from depletion step.")
-                self._cached_tt_means = TT.from_hdf5_channels(
-                    step_group['tt_mean'], tt_shape,
-                    len(self.channel_indices))
-                self._cached_step = step
+            self._load_step_tts(step, step_group, tt_shape)
 
             material_rates = self._empty_material_rates(mat)
             factor = (
@@ -296,6 +330,67 @@ class TTDepletionRates:
                 material_rates[i_nuc, i_rx] = (
                     float(tt_mean._contract_slice(prefix_index)) * factor)
             return material_rates
+
+    def get_material_rel_err(self, step, mat):
+        """Return reaction-rate relative standard errors for one material.
+
+        Relative errors are reconstructed from the stored tally mean and
+        sum-of-squares tensor trains. They are zero when the mean is zero or
+        fewer than two realizations are available.
+        """
+        step = self._normalize_step(step)
+        mat = str(mat)
+        mat_index = self.index_mat[mat]
+
+        with h5py.File(self.filename, 'r') as handle:
+            step_group = handle[
+                f'{_TT_DEPLETION_RATES}/steps/{step}']
+            if step_group.attrs['zero_source']:
+                return self._empty_material_rates(mat)
+            if 'tt_sum_sq' not in step_group:
+                raise RuntimeError(
+                    "Tensor-train relative errors are unavailable in this "
+                    "depletion results file.")
+
+            tt_shape = tuple(int(x) for x in step_group['tt_shape'][()])
+            n_filter_bins = prod(tt_shape)
+            if mat_index < 0 or mat_index >= n_filter_bins:
+                raise IndexError("Material index is out of bounds.")
+
+            prefix_index = _flat_to_tt_index(mat_index, tt_shape)
+            self._load_step_tts(step, step_group, tt_shape)
+            n_realizations = int(step_group['n_realizations'][()])
+
+            relative_errors = self._empty_material_rates(mat)
+            if n_realizations <= 1:
+                return relative_errors
+
+            for (i_nuc, i_rx), tt_mean, tt_sum_sq in zip(
+                    self.channel_indices, self._cached_tt_means,
+                    self._cached_tt_sum_sq):
+                mean = float(tt_mean._contract_slice(prefix_index))
+                if mean == 0.0:
+                    continue
+                sum_sq = float(tt_sum_sq._contract_slice(prefix_index))
+                variance = max(
+                    0.0, sum_sq / n_realizations - mean * mean)
+                relative_errors[i_nuc, i_rx] = (
+                    np.sqrt(variance / (n_realizations - 1)) / abs(mean))
+            return relative_errors
+
+    def get_rel_err(self, step, mat, nuc, rx):
+        """Return one reaction-rate relative standard error."""
+        relative_errors = self.get_material_rel_err(step, mat)
+        return relative_errors[self.index_nuc[nuc], self.index_rx[rx]]
+
+    def to_relative_errors(self, step):
+        """Reconstruct relative errors for all materials at one step."""
+        step = self._normalize_step(step)
+        relative_errors = ReactionRates(
+            self.index_mat, self.index_nuc, self.index_rx, from_results=True)
+        for mat, i_mat in self.index_mat.items():
+            relative_errors[i_mat] = self.get_material_rel_err(step, mat)
+        return relative_errors
 
     def get_rate(self, step, mat, nuc, rx):
         """Return one reaction rate at one depletion step."""

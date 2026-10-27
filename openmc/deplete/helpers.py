@@ -10,6 +10,7 @@ from itertools import product
 from numbers import Integral, Real
 import sys
 
+import numpy as np
 from numpy import dot, zeros, newaxis, asarray
 
 from openmc.mpi import comm
@@ -151,6 +152,7 @@ class DirectReactionRateHelper(ReactionRateHelper):
         self._rate_tally = None
         self._tt_slice_reader = None
         self._rate_tally_means_cache = None
+        self._rate_tally_std_dev_cache = None
         self._tt_shape = tt_shape
         self._tt_eps = tt_eps
         if tt_shape is not None:
@@ -167,6 +169,8 @@ class DirectReactionRateHelper(ReactionRateHelper):
     @ReactionRateHelper.nuclides.setter
     def nuclides(self, nuclides):
         self._tt_slice_reader = None
+        self._rate_tally_means_cache = None
+        self._rate_tally_std_dev_cache = None
         ReactionRateHelper.nuclides.fset(self, nuclides)
         if self._rate_tally is not None:
             self._rate_tally.nuclides = nuclides
@@ -204,6 +208,7 @@ class DirectReactionRateHelper(ReactionRateHelper):
             if self._tt_eps is not None:
                 self._rate_tally.set_tt_eps(self._tt_eps)
         self._rate_tally_means_cache = None
+        self._rate_tally_std_dev_cache = None
 
     @property
     def rate_tally_means(self):
@@ -214,6 +219,13 @@ class DirectReactionRateHelper(ReactionRateHelper):
             self._rate_tally_means_cache = self._rate_tally.mean
         return self._rate_tally_means_cache
 
+    @property
+    def rate_tally_std_dev(self):
+        """The standard errors for all direct reaction-rate tally bins."""
+        if self._rate_tally_std_dev_cache is None:
+            self._rate_tally_std_dev_cache = self._rate_tally.std_dev
+        return self._rate_tally_std_dev_cache
+
     def reset_tally_means(self):
         """Reset the cached mean rate tallies.
         .. note::
@@ -221,6 +233,7 @@ class DirectReactionRateHelper(ReactionRateHelper):
                 This step must be performed after each transport cycle
         """
         self._rate_tally_means_cache = None
+        self._rate_tally_std_dev_cache = None
         self._tt_slice_reader = None
 
     def get_material_rates(
@@ -291,6 +304,34 @@ class DirectReactionRateHelper(ReactionRateHelper):
         full_tally_res = self.rate_tally_means[mat_index]
         for i_tally, (i_nuc, i_rx) in enumerate(product(nuc_index, rx_index)):
             self._results_cache[i_nuc, i_rx] = full_tally_res[i_tally]
+
+        return self._results_cache
+
+    def get_material_rate_rel_err(self, mat_index, nuc_index, rx_index):
+        """Return relative standard errors for one material's direct rates.
+
+        The values are mapped to the same nuclide and reaction ordering as
+        :meth:`get_material_rates`. Zero is returned when the mean is zero or
+        fewer than two realizations are available.
+        """
+        if self._rate_tally.uses_tt:
+            raise RuntimeError(
+                "Use TTDepletionRates to read relative errors from a "
+                "tensor-train tally.")
+
+        self._results_cache.fill(0.0)
+        n_realizations = self._rate_tally.num_realizations
+        if n_realizations <= 1:
+            return self._results_cache
+
+        means = self.rate_tally_means[mat_index]
+        std_dev = self.rate_tally_std_dev[mat_index]
+        rel_err = np.zeros_like(means)
+        valid = (means != 0.0) & np.isfinite(means) & np.isfinite(std_dev)
+        np.divide(std_dev, np.abs(means), out=rel_err, where=valid)
+
+        for i_tally, (i_nuc, i_rx) in enumerate(product(nuc_index, rx_index)):
+            self._results_cache[i_nuc, i_rx] = rel_err[i_tally]
 
         return self._results_cache
 
