@@ -697,8 +697,17 @@ void write_tallies()
       fmt::print(tallies_out, " Tensor-train tally\n");
       fmt::print(tallies_out, "  Realizations                  {}\n",
         tally.n_realizations_);
+      std::ostringstream tt_eps;
+      if (tally.tt_eps_channels_.empty()) {
+        tt_eps << tally.tt_eps_;
+      } else {
+        auto [min_eps, max_eps] = std::minmax_element(
+          tally.tt_eps_channels_.begin(), tally.tt_eps_channels_.end());
+        tt_eps << "per channel (" << tally.tt_eps_channels_.size()
+               << "): [" << *min_eps << ", " << *max_eps << "]";
+      }
       fmt::print(tallies_out, "  TT eps                        {}\n",
-        tally.tt_eps_);
+        tt_eps.str());
       std::ostringstream tt_shape;
       for (std::size_t i = 0; i < tally.tt_shape_.size(); ++i) {
         if (i > 0)

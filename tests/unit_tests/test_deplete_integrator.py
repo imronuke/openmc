@@ -216,7 +216,7 @@ def test_results_save_tt_rates(run_in_tmpdir):
         assert 'tt_mean' in step
         assert 'tt_sum_sq' not in step
         assert handle[
-            'tt_depletion_reaction_rates'].attrs['format_version'] == 2
+            'tt_depletion_reaction_rates'].attrs['format_version'] == 5
 
     StepResult.save(
         op, x, op_result, [0.0, 1.0], 1.0, 0,
@@ -231,11 +231,12 @@ def test_results_save_tt_rates(run_in_tmpdir):
         assert handle['reactions/capture'].attrs['index'] == 1
 
         group = handle['tt_depletion_reaction_rates']
-        assert group.attrs['format_version'] == 3
+        assert group.attrs['format_version'] == 5
         assert group.attrs['tt_layout_version'] == 1
         assert group.attrs['stored_values'] == b'tally_mean'
         assert group.attrs['normalization_mode'] == b'fission-q'
-        assert group.attrs['tt_eps'] == 1.0e-20
+        expected_eps = np.full(2, 1.0e-20)
+        np.testing.assert_array_equal(group.attrs['tt_eps'], expected_eps)
         np.testing.assert_array_equal(
             group['reaction_rate_mask'][()], reaction_rate_mask)
         np.testing.assert_array_equal(
@@ -246,6 +247,7 @@ def test_results_save_tt_rates(run_in_tmpdir):
         assert step['normalization_factor'][()] == 3.0
         assert step['n_realizations'][()] == 4
         np.testing.assert_array_equal(step['tt_shape'][()], [2, 3, 4])
+        np.testing.assert_array_equal(step['tt_eps'][()], expected_eps)
 
         tt_mean = step['tt_mean']
         np.testing.assert_array_equal(
@@ -339,7 +341,9 @@ def test_tt_depletion_rates_reader(run_in_tmpdir):
         _assert_dense_atom_numbers(handle, 0, 0, x)
 
     reader = TTDepletionRates('depletion_results.h5')
-    assert reader.tt_eps == 1.0e-12
+    np.testing.assert_array_equal(reader.tt_eps, [1.0e-12, 1.0e-12])
+    np.testing.assert_array_equal(
+        reader.get_tt_eps(0), [1.0e-12, 1.0e-12])
     np.testing.assert_array_equal(reader.reaction_rate_mask, reaction_rate_mask)
     expected = np.array([[14.0, 22.0]]) * 3.0 / 2.0e24
 
@@ -411,8 +415,8 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
         assert 'reaction rates' not in handle
         _assert_dense_atom_numbers(handle, 0, 0, x)
         group = handle['tt_depletion_reaction_rates']
-        assert group.attrs['format_version'] == 2
-        assert group.attrs['tt_eps'] == 1.0e-30
+        assert group.attrs['format_version'] == 5
+        np.testing.assert_array_equal(group.attrs['tt_eps'], [1.0e-30])
         np.testing.assert_array_equal(
             group['reaction_rate_mask'][()], reaction_rate_mask)
         step = handle['tt_depletion_reaction_rates/steps/0']
@@ -420,10 +424,12 @@ def test_results_save_tt_zero_source_rates(run_in_tmpdir):
         assert step['normalization_factor'][()] == 0.0
         assert step['n_realizations'][()] == 0
         np.testing.assert_array_equal(step['tt_shape'][()], [1])
+        np.testing.assert_array_equal(step['tt_eps'][()], [1.0e-30])
         assert 'tt_mean' not in step
 
     reader = TTDepletionRates('depletion_results.h5')
-    assert reader.tt_eps == 1.0e-30
+    np.testing.assert_array_equal(reader.tt_eps, [1.0e-30])
+    np.testing.assert_array_equal(reader.get_tt_eps(0), [1.0e-30])
     material_rates = reader.get_material_rates(0, "1")
     np.testing.assert_allclose(material_rates, [[0.0]])
     np.testing.assert_allclose(reader.get_material_rel_err(0, "1"), [[0.0]])
@@ -455,7 +461,7 @@ def test_results_save_direct_rate_relative_errors(run_in_tmpdir):
 
     with h5py.File('depletion_results.h5', 'r') as handle:
         np.testing.assert_allclose(
-            handle['reaction rate relative errors'][()], [[[0.125]]])
+            handle['reaction rate relative errors'][()], [[[[0.125]]]])
         np.testing.assert_allclose(
             handle['reaction rates'][()], [[[[3.0]]]])
 

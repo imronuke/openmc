@@ -3,12 +3,15 @@
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from openmc.deplete import AtomNumber, CoupledOperator, Chain, ReactionRates
+from openmc.deplete.helpers import DirectReactionRateHelper
 from openmc.deplete.tt_depletion import (
     _get_tt_reaction_rates, _prepare_tt_reaction_rates)
+from openmc.tt import TT
 import openmc
 import numpy as np
 
@@ -199,6 +202,70 @@ def test_tt_material_rate_helpers():
     expected_rates[1, 1] = 0.0
     np.testing.assert_allclose(
         material_rates, expected_rates * normalization_factor / 2.0e24)
+
+
+def test_adaptive_tt_eps_uses_nonzero_rate_bins():
+    """Adaptive tolerances use nonzero-bin RSDs and volume-corrected rates."""
+    n_realizations = 4
+    means = np.array([1.0, 4.0, 0.0])
+    relative_errors = np.array([0.1, 0.3, 100.0])
+    sum_sq = n_realizations * (
+        means**2 + (n_realizations - 1) * (relative_errors * means)**2)
+    zero_means = np.zeros(3)
+    zero_sum_sq = np.array([0.0, 0.0, 100.0])
+
+    def make_tt(values):
+        core = np.asarray(values, dtype=np.float64).reshape(1, 3, 1)
+        return TT([core], shape=(3,))
+
+    helper = object.__new__(DirectReactionRateHelper)
+    helper._tt_eps = np.full(2, 1.0e-18)
+    helper._tt_nuclide_index = {'U235': 0}
+    helper._tt_material_volumes = np.array([1.0, 2.0, 4.0])
+    helper._results_cache = np.zeros((1, 2))
+    helper._rate_tally = SimpleNamespace(
+        num_realizations=n_realizations,
+        tt_shape=(3,),
+        nuclides=['U235'],
+        tt_sum=(make_tt(means * n_realizations), make_tt(zero_means)),
+        tt_sum_sq=(make_tt(sum_sq), make_tt(zero_sum_sq)))
+
+    next_eps = helper._get_next_tt_eps(1.0)
+
+    # The zero-rate bin has a large nominal error and must not enter p95.
+    # Nonzero physical rates have a range ratio of 1:2 after volume scaling.
+    np.testing.assert_allclose(next_eps, [0.145, 1.0e-18])
+
+
+@pytest.mark.parametrize('rank', [0, 1])
+def test_adaptive_tt_eps_is_synchronized_across_ranks(monkeypatch, rank):
+    """Only rank zero computes adaptive eps; every rank applies the result."""
+    expected_eps = np.array([1.0e-6, 2.0e-6])
+    helper = MagicMock()
+    helper._get_next_tt_eps.return_value = expected_eps
+    op = object.__new__(CoupledOperator)
+    op._rate_helper = helper
+
+    def bcast(payload, root=0):
+        assert root == 0
+        if rank == 0:
+            assert payload[0]
+            np.testing.assert_array_equal(payload[1], expected_eps)
+        else:
+            assert payload is None
+        return True, expected_eps
+
+    monkeypatch.setattr(
+        'openmc.deplete.coupled_operator.comm',
+        SimpleNamespace(rank=rank, size=2, bcast=bcast))
+
+    op._update_tt_eps(1.0)
+
+    if rank == 0:
+        helper._get_next_tt_eps.assert_called_once_with(1.0)
+    else:
+        helper._get_next_tt_eps.assert_not_called()
+    helper._update_tt_eps.assert_called_once_with(expected_eps)
 
 
 def test_tt_operator_keeps_dense_atom_number(model):

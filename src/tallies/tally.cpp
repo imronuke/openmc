@@ -563,6 +563,7 @@ void Tally::set_scores(const vector<std::string>& scores)
   // Reset state and prepare for the new scores.
   scores_.clear();
   scores_.reserve(scores.size());
+  tt_eps_channels_.clear();
 
   // Check for the presence of certain restrictive filters.
   bool energyout_present = energyout_filter_ != C_NONE;
@@ -955,6 +956,12 @@ void Tally::accumulate()
       int n_filter_bins = results_.shape(0);
       int n_channels = results_.shape(1);
 
+      if (!tt_eps_channels_.empty() &&
+          tt_eps_channels_.size() != static_cast<std::size_t>(n_channels)) {
+        fatal_error(
+          "Tensor-train tolerance count does not match tally channel count.");
+      }
+
 #pragma omp parallel for if (n_channels > 1) schedule(dynamic)
       for (int channel = 0; channel < n_channels; ++channel) {
         vector<double> channel_values(n_filter_bins);
@@ -970,23 +977,25 @@ void Tally::accumulate()
         if (!nonzero)
           continue;
 
+        double eps = tt_eps_channels_.empty() ? tt_eps_ :
+                     tt_eps_channels_[channel];
         TT sum = tt_svd_tally_value(channel_values.data(), n_filter_bins,
-          tt_shape_, norm, false, tt_eps_);
+          tt_shape_, norm, false, eps);
         TT sum_sq = tt_svd_tally_value(channel_values.data(), n_filter_bins,
-          tt_shape_, norm, true, tt_eps_);
+          tt_shape_, norm, true, eps);
 
         if (tt_sum_[channel].cores.empty()) {
           tt_sum_[channel] = std::move(sum);
         } else {
           tt_sum_[channel] = tt_sum_[channel] + sum;
-          tt_sum_[channel].round(std::nullopt, tt_eps_);
+          tt_sum_[channel].round(std::nullopt, eps);
         }
 
         if (tt_sum_sq_[channel].cores.empty()) {
           tt_sum_sq_[channel] = std::move(sum_sq);
         } else {
           tt_sum_sq_[channel] = tt_sum_sq_[channel] + sum_sq;
-          tt_sum_sq_[channel].round(std::nullopt, tt_eps_);
+          tt_sum_sq_[channel].round(std::nullopt, eps);
         }
       }
 
@@ -1617,6 +1626,49 @@ extern "C" int openmc_tally_set_tt_eps(int32_t index, double eps)
 
   auto& tally {model::tallies[index]};
   tally->tt_eps_ = eps;
+  tally->tt_eps_channels_.clear();
+  return 0;
+}
+
+extern "C" int openmc_tally_set_tt_eps_per_channel(
+  int32_t index, int n, const double* eps)
+{
+  if (index < 0 || index >= model::tallies.size()) {
+    set_errmsg("Index in tallies array is out of bounds.");
+    return OPENMC_E_OUT_OF_BOUNDS;
+  }
+
+  auto& tally {model::tallies[index]};
+  if (!tally->use_tt_) {
+    set_errmsg(
+      "Per-channel tensor-train tolerances require TT tally storage.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+  auto n_channels = tally->scores_.size() * tally->nuclides_.size();
+  if (n < 0 || static_cast<std::size_t>(n) != n_channels) {
+    set_errmsg(
+      "Number of tensor-train tolerances must match the tally channel count.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+  if (n > 0 && !eps) {
+    set_errmsg("Tensor-train tolerance array pointer is null.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
+  vector<double> channel_eps;
+  channel_eps.reserve(n);
+  for (int i = 0; i < n; ++i) {
+    if (!std::isfinite(eps[i]) || eps[i] <= 0.0) {
+      set_errmsg("Tensor-train tolerances must be finite and positive.");
+      return OPENMC_E_INVALID_ARGUMENT;
+    }
+    channel_eps.push_back(eps[i]);
+  }
+
+  if (!channel_eps.empty()) {
+    tally->tt_eps_ = channel_eps.front();
+  }
+  tally->tt_eps_channels_ = std::move(channel_eps);
   return 0;
 }
 
@@ -1824,6 +1876,7 @@ extern "C" int openmc_tally_set_nuclides(
   }
 
   model::tallies[index]->nuclides_ = nucs;
+  model::tallies[index]->tt_eps_channels_.clear();
 
   return 0;
 }

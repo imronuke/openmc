@@ -36,7 +36,7 @@ from .tt_depletion import _TTReactionRates, _prepare_tt_reaction_rates
 __all__ = ["CoupledOperator", "Operator", "OperatorResult"]
 
 
-_DEFAULT_TT_EPS = 1.0e-8
+_DEFAULT_TT_EPS = 1.0e-18
 
 
 def _normalize_tt_shape(shape):
@@ -186,7 +186,9 @@ class CoupledOperator(OpenMCOperator):
         the number of burnable material filter bins. Each nuclide-reaction
         channel is compressed independently over this shape. Dimensions
         equal to one are dropped. Optional ``"tt_eps"`` sets the relative
-        tensor-train truncation tolerance. The supplied shape order
+        tensor-train truncation tolerance as a scalar broadcast to all
+        nuclide-reaction channels. The default is ``1e-18`` for every channel.
+        The supplied shape order
         must match the material-filter bin order.
     reduce_chain_level : int, optional
         Depth of the search when reducing the depletion chain. The default
@@ -285,6 +287,9 @@ class CoupledOperator(OpenMCOperator):
             tt_eps = tt_opts.get('tt_eps', _DEFAULT_TT_EPS)
             check_type('tt_opts["tt_eps"]', tt_eps, Real)
             check_greater_than('tt_opts["tt_eps"]', tt_eps, 0.0)
+            if not np.isfinite(tt_eps):
+                raise ValueError(
+                    'tt_opts["tt_eps"] must be finite and positive.')
             if reaction_rate_mode != "direct":
                 raise ValueError(
                     "Tensor-train reaction-rate mode currently requires "
@@ -388,7 +393,8 @@ class CoupledOperator(OpenMCOperator):
         if reaction_rate_mode == "direct":
             self._rate_helper = DirectReactionRateHelper(
                 self.reaction_rates.n_nuc, self.reaction_rates.n_react,
-                tt_shape=tt_shape, tt_eps=tt_eps)
+                tt_shape=tt_shape, tt_eps=tt_eps,
+                tt_nuclides=list(self.reaction_rates.index_nuc))
         elif reaction_rate_mode == "flux":
             # Ensure energy group boundaries were specified
             if 'energies' not in reaction_rate_opts:
@@ -502,7 +508,9 @@ class CoupledOperator(OpenMCOperator):
         # a transport solve
         if source_rate == 0.0:
             if self._tt_depletion_used:
-                rates = _TTReactionRates(0.0, zero_source=True)
+                rates = _TTReactionRates(
+                    0.0, zero_source=True,
+                    tt_eps=self._rate_helper._tt_eps_active)
             else:
                 rates = self.reaction_rates.copy()
                 rates.fill(0.0)
@@ -517,7 +525,9 @@ class CoupledOperator(OpenMCOperator):
                 self, source_rate)
             mask = vars(self).get('_tt_reaction_rate_mask')
             rates = _TTReactionRates(
-                normalization_factor, reaction_rate_mask=mask)
+                normalization_factor, reaction_rate_mask=mask,
+                tt_eps=self._rate_helper._tt_eps_active)
+            self._update_tt_eps(normalization_factor)
             self._print_tt_storage_reports()
         else:
             rates = self._calculate_reaction_rates(source_rate)
@@ -530,6 +540,38 @@ class CoupledOperator(OpenMCOperator):
         self._n_calls += 1
 
         return copy.deepcopy(op_result)
+
+    def _update_tt_eps(self, normalization_factor):
+        """Adapt TT channel tolerances and synchronize them across MPI ranks."""
+        if comm.size == 1:
+            tt_eps = self._rate_helper._get_next_tt_eps(
+                normalization_factor)
+            if tt_eps is None:
+                raise RuntimeError(
+                    "The TT reaction-rate helper has no channel tolerances "
+                    "to update.")
+            self._rate_helper._update_tt_eps(tt_eps)
+            return
+
+        if comm.rank == 0:
+            try:
+                tt_eps = self._rate_helper._get_next_tt_eps(
+                    normalization_factor)
+                if tt_eps is None:
+                    raise RuntimeError(
+                        "The TT reaction-rate helper has no channel "
+                        "tolerances to update.")
+                payload = (True, tt_eps)
+            except Exception as exc:
+                payload = (False, f"{type(exc).__name__}: {exc}")
+        else:
+            payload = None
+
+        succeeded, result = comm.bcast(payload, root=0)
+        if not succeeded:
+            raise RuntimeError(
+                "Unable to update adaptive TT tolerances: " + result)
+        self._rate_helper._update_tt_eps(result)
 
     def _print_tt_storage_reports(self):
         if comm.rank != 0:

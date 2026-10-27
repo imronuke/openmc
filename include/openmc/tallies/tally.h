@@ -177,6 +177,9 @@ public:
   //! Relative TT truncation tolerance.
   double tt_eps_ {1.0e-2};
 
+  //! Optional relative TT truncation tolerance for each nuclide-score channel.
+  vector<double> tt_eps_channels_;
+
   //! True if this tally should be written to statepoint files
   bool writable_ {true};
 

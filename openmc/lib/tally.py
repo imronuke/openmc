@@ -112,6 +112,10 @@ _dll.openmc_tally_set_scores.errcheck = _error_handler
 _dll.openmc_tally_set_tt_eps.argtypes = [c_int32, c_double]
 _dll.openmc_tally_set_tt_eps.restype = c_int
 _dll.openmc_tally_set_tt_eps.errcheck = _error_handler
+_dll.openmc_tally_set_tt_eps_per_channel.argtypes = [
+    c_int32, c_int, POINTER(c_double)]
+_dll.openmc_tally_set_tt_eps_per_channel.restype = c_int
+_dll.openmc_tally_set_tt_eps_per_channel.errcheck = _error_handler
 _dll.openmc_tally_set_tt_shape.argtypes = [
     c_int32, c_int, POINTER(c_int32)]
 _dll.openmc_tally_set_tt_shape.restype = c_int
@@ -535,6 +539,14 @@ class Tally(_FortranObjectWithID):
 
     def set_tt_eps(self, eps):
         _dll.openmc_tally_set_tt_eps(self._index, eps)
+
+    def _set_tt_eps_per_channel(self, eps):
+        eps = np.ascontiguousarray(eps, dtype=np.float64)
+        if eps.ndim != 1:
+            raise ValueError("Per-channel tensor-train tolerances must be 1D.")
+        ptr = eps.ctypes.data_as(POINTER(c_double)) if eps.size else None
+        _dll.openmc_tally_set_tt_eps_per_channel(
+            self._index, eps.size, ptr)
 
     def set_tt_shape(self, shape):
         shape = np.asarray(shape, dtype=np.int32)

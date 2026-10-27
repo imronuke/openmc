@@ -27,10 +27,13 @@ class _TTReactionRates:
 
     def __init__(
             self, normalization_factor, zero_source=False,
-            reaction_rate_mask=None):
+            reaction_rate_mask=None, tt_eps=None):
         self.normalization_factor = normalization_factor
         self.zero_source = zero_source
         self.reaction_rate_mask = reaction_rate_mask
+        self.tt_eps = (
+            None if tt_eps is None else
+            np.asarray(tt_eps, dtype=np.float64).copy())
 
 
 def _copy_tt(tt, divisor=1):
@@ -45,7 +48,18 @@ def _get_tt_depletion_rate_write_data(
         operator, rates, write_rates_rstd=False):
     """Return TT depletion reaction-rate data for HDF5 output."""
     rate_helper = vars(operator).get('_rate_helper')
-    tt_eps = None if rate_helper is None else vars(rate_helper).get('_tt_eps')
+    tt_eps = getattr(rates, 'tt_eps', None)
+    if tt_eps is None and rate_helper is not None:
+        tt_eps = vars(rate_helper).get('_tt_eps_active')
+        if tt_eps is None:
+            tt_eps = vars(rate_helper).get('_tt_eps')
+    if tt_eps is not None:
+        tt_eps = np.asarray(tt_eps, dtype=np.float64)
+        if tt_eps.ndim == 0:
+            tt_eps = float(tt_eps)
+        elif tt_eps.ndim != 1:
+            raise RuntimeError(
+                "Tensor-train channel tolerances must be one-dimensional.")
     tt_shape = None if rate_helper is None else vars(rate_helper).get('_tt_shape')
     reaction_rate_mask = getattr(rates, 'reaction_rate_mask', None)
     if reaction_rate_mask is None:
@@ -57,6 +71,11 @@ def _get_tt_depletion_rate_write_data(
     channel_indices = np.asarray(
         [(i_nuc, i_rx) for i_nuc in nuc_indices
          for i_rx in reaction_indices], dtype=np.int64).reshape((-1, 2))
+    if (tt_eps is not None and isinstance(tt_eps, np.ndarray) and
+            tt_eps.size != len(channel_indices)):
+        raise RuntimeError(
+            "Tensor-train tolerance count does not match depletion rate "
+            "indices.")
 
     if getattr(rates, 'zero_source', False):
         return {
@@ -115,14 +134,33 @@ def _get_tt_depletion_rate_write_data(
 def _write_tt_depletion_rates(handle, step, data):
     """Write per-step TT depletion reaction-rate data to HDF5."""
     group = handle.require_group(_TT_DEPLETION_RATES)
-    format_version = 3 if data['write_rates_rstd'] else 2
+    channel_indices = np.asarray(data['channel_indices'], dtype=np.int64)
+    tt_eps = data['tt_eps']
+    if tt_eps is not None:
+        tt_eps = np.asarray(tt_eps, dtype=np.float64)
+        if tt_eps.ndim == 0:
+            tt_eps = (
+                None if len(channel_indices) == 0 else
+                np.full(len(channel_indices), float(tt_eps)))
+        elif tt_eps.ndim != 1:
+            raise ValueError(
+                "Tensor-train channel tolerances must be one-dimensional.")
+        elif tt_eps.size == 0 and len(channel_indices) == 0:
+            tt_eps = None
+        elif tt_eps.size != len(channel_indices):
+            raise ValueError(
+                "Tensor-train tolerance count does not match channel "
+                "indices.")
+    format_version = (
+        5 if tt_eps is not None else
+        3 if data['write_rates_rstd'] else 2)
     group.attrs['format_version'] = max(
         int(group.attrs.get('format_version', 2)), format_version)
     group.attrs['tt_layout_version'] = _TT_LAYOUT_VERSION
     group.attrs['stored_values'] = np.bytes_('tally_mean')
     group.attrs['normalization_mode'] = np.bytes_('fission-q')
-    if data['tt_eps'] is not None:
-        group.attrs['tt_eps'] = data['tt_eps']
+    if tt_eps is not None:
+        group.attrs['tt_eps'] = tt_eps
     reaction_rate_mask = np.asarray(data['reaction_rate_mask'], dtype=bool)
     if 'reaction_rate_mask' in group:
         if not np.array_equal(group['reaction_rate_mask'][()], reaction_rate_mask):
@@ -132,7 +170,6 @@ def _write_tt_depletion_rates(handle, step, data):
     else:
         group.create_dataset('reaction_rate_mask', data=reaction_rate_mask)
 
-    channel_indices = np.asarray(data['channel_indices'], dtype=np.int64)
     if 'channel_indices' in group:
         if not np.array_equal(group['channel_indices'][()], channel_indices):
             raise ValueError(
@@ -153,6 +190,8 @@ def _write_tt_depletion_rates(handle, step, data):
         'n_realizations', data=data['n_realizations'])
     step_group.create_dataset(
         'tt_shape', data=np.asarray(data['tt_shape'], dtype=np.int64))
+    if tt_eps is not None:
+        step_group.create_dataset('tt_eps', data=tt_eps)
 
     if not data['zero_source']:
         tt_mean_group = step_group.create_group('tt_mean')
@@ -183,7 +222,7 @@ class TTDepletionRates:
 
             tt_group = handle[_TT_DEPLETION_RATES]
             format_version = int(tt_group.attrs.get('format_version', -1))
-            if format_version not in (2, 3):
+            if format_version not in (2, 3, 4, 5):
                 raise RuntimeError(
                     f"Unsupported TT depletion results format version "
                     f"{format_version}.")
@@ -196,7 +235,9 @@ class TTDepletionRates:
                     f"{layout_version}.")
             self.tt_eps = tt_group.attrs.get('tt_eps')
             if self.tt_eps is not None:
-                self.tt_eps = float(self.tt_eps)
+                tt_eps = np.asarray(self.tt_eps, dtype=np.float64)
+                self.tt_eps = (
+                    float(tt_eps) if tt_eps.ndim == 0 else tt_eps)
 
             self.index_mat = {}
             self.volume = {}
@@ -250,6 +291,11 @@ class TTDepletionRates:
                     self.channel_indices):
                 raise RuntimeError(
                     "Tensor-train channel indices contain duplicates.")
+            if (isinstance(self.tt_eps, np.ndarray) and
+                    self.tt_eps.size != len(self.channel_indices)):
+                raise RuntimeError(
+                    "Tensor-train tolerance count does not match channel "
+                    "indices.")
 
             self.n_steps = handle['number'].shape[0]
 
@@ -263,6 +309,33 @@ class TTDepletionRates:
         if step < 0 or step >= self.n_steps:
             raise IndexError("Depletion step index is out of bounds.")
         return step
+
+    def get_tt_eps(self, step):
+        """Return channel truncation tolerances used for a depletion step.
+
+        New-format files store one tolerance per channel for each step. Older
+        files store a scalar or channel array on the TT metadata group, which
+        is returned when step-specific tolerance data is unavailable.
+        """
+        step = self._normalize_step(step)
+        with h5py.File(self.filename, 'r') as handle:
+            tt_group = handle[_TT_DEPLETION_RATES]
+            step_group = tt_group[f'steps/{step}']
+            if 'tt_eps' in step_group:
+                tt_eps = step_group['tt_eps'][()]
+            else:
+                tt_eps = tt_group.attrs.get('tt_eps')
+
+        if tt_eps is None:
+            return None
+        tt_eps = np.asarray(tt_eps, dtype=np.float64)
+        if tt_eps.ndim == 0:
+            return float(tt_eps)
+        if tt_eps.ndim != 1 or tt_eps.size != len(self.channel_indices):
+            raise RuntimeError(
+                "Tensor-train tolerance count does not match channel "
+                "indices.")
+        return tt_eps
 
     def _empty_material_rates(self, mat):
         rates = ReactionRates(

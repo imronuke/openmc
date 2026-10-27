@@ -147,14 +147,19 @@ class DirectReactionRateHelper(ReactionRateHelper):
     nuclides : list of str
         All nuclides with desired reaction rates.
     """
-    def __init__(self, n_nuc, n_react, tt_shape=None, tt_eps=None):
+    def __init__(
+            self, n_nuc, n_react, tt_shape=None, tt_eps=None,
+            tt_nuclides=None):
         super().__init__(n_nuc, n_react)
         self._rate_tally = None
         self._tt_slice_reader = None
         self._rate_tally_means_cache = None
         self._rate_tally_std_dev_cache = None
         self._tt_shape = tt_shape
-        self._tt_eps = tt_eps
+        self._tt_eps = None
+        self._tt_eps_active = None
+        self._tt_nuclide_index = None
+        self._tt_material_volumes = None
         if tt_shape is not None:
             check_type('tt_shape', tt_shape, Iterable)
             self._tt_shape = tuple(tt_shape)
@@ -162,6 +167,45 @@ class DirectReactionRateHelper(ReactionRateHelper):
                 check_type('tt_shape dimension', n, Integral)
                 check_greater_than('tt_shape dimension', n, 0)
             self._tt_shape = tuple(int(n) for n in self._tt_shape)
+
+            n_nuc, n_react = self._results_cache.shape
+            if tt_nuclides is not None:
+                if len(tt_nuclides) != n_nuc:
+                    raise ValueError(
+                        "The TT channel nuclide ordering does not match the "
+                        "reaction-rate nuclide count.")
+                self._tt_nuclide_index = {
+                    nuc: i for i, nuc in enumerate(tt_nuclides)}
+
+            if tt_eps is None:
+                tt_eps = 1.0e-18
+            if isinstance(tt_eps, Real):
+                check_greater_than('tt_eps', tt_eps, 0.0)
+                if not np.isfinite(tt_eps):
+                    raise ValueError("tt_eps must be finite and positive.")
+                self._tt_eps = np.full(
+                    n_nuc * n_react, float(tt_eps), dtype=np.float64)
+            else:
+                try:
+                    tt_eps = np.asarray(tt_eps, dtype=np.float64)
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(
+                        "tt_eps must be a positive scalar or an array of "
+                        "positive channel tolerances.") from exc
+                if tt_eps.ndim == 2:
+                    if tt_eps.shape != (n_nuc, n_react):
+                        raise ValueError(
+                            "A two-dimensional tt_eps array must have shape "
+                            "(number of nuclides, number of reactions).")
+                    tt_eps = tt_eps.reshape(-1)
+                elif tt_eps.ndim != 1 or tt_eps.size != n_nuc * n_react:
+                    raise ValueError(
+                        "A one-dimensional tt_eps array must have one "
+                        "entry per nuclide-reaction channel.")
+                if not np.all(np.isfinite(tt_eps)) or np.any(tt_eps <= 0.0):
+                    raise ValueError(
+                        "TT channel tolerances must be finite and positive.")
+                self._tt_eps = tt_eps.copy()
 
         # Automatically pre-calculate reaction rates for depletion
         openmc.lib.settings.need_depletion_rx = True
@@ -174,6 +218,130 @@ class DirectReactionRateHelper(ReactionRateHelper):
         ReactionRateHelper.nuclides.fset(self, nuclides)
         if self._rate_tally is not None:
             self._rate_tally.nuclides = nuclides
+            self._set_active_tt_eps(nuclides)
+
+    def _set_active_tt_eps(self, nuclides):
+        """Set channel tolerances for the currently active tally nuclides."""
+        if self._tt_eps is None:
+            return
+
+        n_react = self._results_cache.shape[1]
+        if not nuclides:
+            active_eps = np.empty(0, dtype=np.float64)
+        elif np.all(self._tt_eps == self._tt_eps[0]):
+            active_eps = np.full(
+                len(nuclides) * n_react, self._tt_eps[0], dtype=np.float64)
+        else:
+            if self._tt_nuclide_index is None:
+                raise ValueError(
+                    "Per-channel tt_eps requires the full reaction-rate "
+                    "nuclide ordering.")
+            try:
+                active_indices = [
+                    self._tt_nuclide_index[nuc] for nuc in nuclides]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Nuclide {exc.args[0]} has no TT tolerance entry.") from exc
+            active_eps = self._tt_eps.reshape(-1, n_react)[
+                active_indices].reshape(-1)
+
+        self._tt_eps_active = active_eps
+        self._rate_tally._set_tt_eps_per_channel(active_eps)
+
+    def _get_next_tt_eps(self, normalization_factor):
+        """Calculate next tolerances from current per-channel TT results."""
+        if self._tt_eps is None or self._rate_tally is None:
+            return None
+
+        tally = self._rate_tally
+        n_realizations = tally.num_realizations
+        if (n_realizations <= 1 or not np.isfinite(normalization_factor) or
+                normalization_factor <= 0.0):
+            return self._tt_eps.copy()
+
+        volumes = self._tt_material_volumes
+        n_bins = int(np.prod(tally.tt_shape))
+        if volumes is None or len(volumes) != n_bins:
+            raise RuntimeError(
+                "TT material volumes do not match tally filter bins.")
+        if not np.all(np.isfinite(volumes)) or np.any(volumes <= 0.0):
+            raise RuntimeError(
+                "TT material volumes must be finite and positive.")
+
+        n_react = self._results_cache.shape[1]
+        tally_nuclides = tally.nuclides
+        tt_sum = tally.tt_sum
+        tt_sum_sq = tally.tt_sum_sq
+        if (len(tt_sum) != len(tally_nuclides) * n_react or
+                len(tt_sum_sq) != len(tt_sum)):
+            raise RuntimeError(
+                "TT tally channels do not match reaction-rate channels.")
+
+        next_eps = self._tt_eps.copy()
+        # The global normalization is common to every material. Volume is
+        # material-specific and must be included in the rate range.
+        rate_scale = normalization_factor / (1.0e24 * volumes)
+        for i_nuc, nuc in enumerate(tally_nuclides):
+            if self._tt_nuclide_index is None:
+                raise RuntimeError(
+                    "TT channel nuclide ordering is unavailable.")
+            try:
+                global_i_nuc = self._tt_nuclide_index[nuc]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"Nuclide {exc.args[0]} has no TT tolerance entry.") from exc
+
+            for i_react in range(n_react):
+                channel = i_nuc * n_react + i_react
+                mean = np.asarray(
+                    tt_sum[channel]._contract_slice(()), dtype=np.float64
+                ).reshape(-1) / n_realizations
+                sum_sq = np.asarray(
+                    tt_sum_sq[channel]._contract_slice(()), dtype=np.float64
+                ).reshape(-1)
+                rates = mean * rate_scale
+                # Exclude zero-rate bins from both the percentile and range.
+                nonzero = np.isfinite(rates) & (rates != 0.0)
+                if not np.any(nonzero):
+                    continue
+
+                variance = np.maximum(
+                    0.0, sum_sq / n_realizations - mean * mean)
+                std_dev = np.sqrt(variance / (n_realizations - 1))
+                relative_std_dev = np.full(n_bins, np.nan)
+                np.divide(
+                    std_dev, np.abs(mean), out=relative_std_dev,
+                    where=(mean != 0.0))
+                valid = nonzero & np.isfinite(relative_std_dev)
+                if not np.any(valid):
+                    continue
+
+                rate_magnitudes = np.abs(rates[nonzero])
+                rate_ratio = np.min(rate_magnitudes) / np.max(
+                    rate_magnitudes)
+                eps = (np.percentile(relative_std_dev[valid], 95) + 
+                       np.percentile(relative_std_dev[valid], 5)) * rate_ratio
+                if not np.isfinite(eps) or eps < 0.0:
+                    continue
+                if eps == 0.0:
+                    # The C++ tally API requires positive eps; this is
+                    # effectively zero and avoids truncation.
+                    eps = np.finfo(np.float64).tiny
+                next_eps[global_i_nuc * n_react + i_react] = eps
+
+        return next_eps
+
+    def _update_tt_eps(self, tt_eps):
+        """Replace global channel tolerances and update the active tally."""
+        tt_eps = np.asarray(tt_eps, dtype=np.float64)
+        if (tt_eps.ndim != 1 or tt_eps.size != self._tt_eps.size or
+                not np.all(np.isfinite(tt_eps)) or np.any(tt_eps <= 0.0)):
+            raise ValueError(
+                "TT channel tolerances must be finite, positive, and match "
+                "the reaction-rate channels.")
+        self._tt_eps = tt_eps.copy()
+        if self._rate_tally is not None:
+            self._set_active_tt_eps(self._rate_tally.nuclides)
 
     def generate_tallies(self, materials, scores):
         """Produce one-group reaction rate tally
@@ -197,6 +365,10 @@ class DirectReactionRateHelper(ReactionRateHelper):
         self._rate_tally.filters = [MaterialFilter(materials)]
         self._rate_tally.multiply_density = False
         if self._tt_shape is not None:
+            material_filter = self._rate_tally.filters[0]
+            self._tt_material_volumes = np.asarray(
+                [material.volume for material in material_filter.bins],
+                dtype=np.float64)
             tt_size = 1
             for n in self._tt_shape:
                 tt_size *= n
@@ -206,7 +378,7 @@ class DirectReactionRateHelper(ReactionRateHelper):
                     "of depletion material bins.")
             self._rate_tally.set_tt_shape(self._tt_shape)
             if self._tt_eps is not None:
-                self._rate_tally.set_tt_eps(self._tt_eps)
+                self._rate_tally.set_tt_eps(float(self._tt_eps[0]))
         self._rate_tally_means_cache = None
         self._rate_tally_std_dev_cache = None
 

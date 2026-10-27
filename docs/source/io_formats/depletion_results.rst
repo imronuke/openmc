@@ -63,14 +63,20 @@ This group is present when ``write_rates=True`` or
              depletion reaction-rate storage format. Version 2 stores
              per-channel means and channel-to-rate indices. Version 3 also
              stores per-channel sums of squares for relative standard errors.
+             Version 4 stores a tolerance value for each channel; those values
+             may be equal. Version 5 stores the per-channel tolerances for
+             each step and may also contain sums of squares when relative
+             errors were requested.
              - **tt_layout_version** (*int*) -- Tensor-train layout version.
                Version 1 stores packed per-channel cores.
              - **stored_values** (*char[]*) -- Indicates the stored tensor-train
                values. Currently ``tally_mean``.
              - **normalization_mode** (*char[]*) -- Depletion normalization mode
                used with the stored tensor-train tally values.
-             - **tt_eps** (*double*) -- Tensor-train truncation tolerance used
-               for depletion reaction-rate tally accumulation.
+             - **tt_eps** (*double[]*, version 4 and later) -- Most recently
+               written per-channel tensor-train truncation tolerances. The
+               array order follows **channel_indices**. Older format versions
+               may store a scalar.
 
 :Datasets: - **reaction_rate_mask** (*bool[][]*) -- Mask indicating which
              nuclide/reaction pairs are present in the depletion chain. This
@@ -94,6 +100,9 @@ This group is present when ``write_rates=True`` or
            - **tt_shape** (*int[]*) -- Spatial shape of each channel's
              tensor-train. Its product equals the number of material filter
              bins.
+           - **tt_eps** (*double[]*, version 5) -- Per-channel truncation
+             tolerances used for the step's tensor-train tally accumulation.
+             The array order follows **channel_indices**.
 
 **/tt_depletion_reaction_rates/steps/<step>/tt_mean/**
 

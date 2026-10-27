@@ -238,6 +238,8 @@ int openmc_tally_set_id(int32_t index, int32_t id);
 int openmc_tally_set_nuclides(int32_t index, int n, const char** nuclides);
 int openmc_tally_set_scores(int32_t index, int n, const char** scores);
 int openmc_tally_set_tt_eps(int32_t index, double eps);
+int openmc_tally_set_tt_eps_per_channel(
+  int32_t index, int n, const double* eps);
 int openmc_tally_set_tt_shape(int32_t index, int n, const int32_t* shape);
 int openmc_tally_set_type(int32_t index, const char* type);
 int openmc_tally_set_writable(int32_t index, bool writable);
